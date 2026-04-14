@@ -1,0 +1,109 @@
+{
+  "manifest_version": 3,
+
+  "name": "VisionTranslate",
+  "version": "0.1.0",
+  "description": "Detect text in images on any webpage and overlay translated text directly on the image. Powered by OCR and machine translation.",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "visiontranslate@lensmu.dev",
+      "strict_min_version": "109.0"
+    }
+  },
+
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxa6PK0gNDdfTUPIK561Lv6NAOoCIDZCYHy67NsdJ53CgX4j/3zBrHX7hYbpapd4JNoX4ZC9snkU+9UpI2rKBCpTTnzPXKPwLpPq1ohwo1/rRRqfcl/2l85aOcb7rBtprrnPYGiuhsD04IJlyC1WSmr7dDxs9tikgnSphGCbAeImramEBwWI4TMcsaQJNtgtH9jB1rSI/RZ8NtRihzG2LwioSQyvSJHaFrWdzQIuSi9sURJpRCD7YvlWaQHKwyWOKFdBUouvPPWWsfQ3aOILf2i3sGtE2psPtKeDMQ0nmV6U+5A7aWCj8YENPVyTHkt7rh0Uwzjja+pcu1suSEwBmMQIDAQAB",
+
+  "icons": {
+    "16": "icons/VT_KD_16.png",
+    "32": "icons/VT_KD_32.png",
+    "48": "icons/VT_KD_48.png",
+    "128": "icons/VT_KD_128.png"
+  },
+
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "notifications",
+    "identity"
+  ],
+
+  "host_permissions": [
+    "<all_urls>",
+    "https://cdn.jsdelivr.net/*",
+    "http://localhost:8000/*",
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.elevenlabs.io/*",
+    "https://api.mymemory.translated.net/*",
+    "https://libretranslate.com/*",
+    "https://translate.terraprint.co/*",
+    "https://translate.fedilab.app/*",
+    "https://dev-f061rrmnizussvbh.us.auth0.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "dist/popup/index.html",
+    "default_title": "VisionTranslate — Click to open settings, or use the keyboard shortcut to toggle",
+    "default_icon": {
+      "16": "icons/VT_KD_16.png",
+      "32": "icons/VT_KD_32.png",
+      "48": "icons/VT_KD_48.png",
+      "128": "icons/VT_KD_128.png"
+    }
+  },
+
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+T",
+        "mac": "Alt+Shift+T"
+      },
+      "description": "Open VisionTranslate popup"
+    },
+    "toggle-translation": {
+      "suggested_key": {
+        "default": "Alt+Shift+V",
+        "mac": "Alt+Shift+V"
+      },
+      "description": "Toggle translation overlay on current page"
+    }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*",
+        "overlay.js",
+        "utils/*",
+        "dist/*",
+        "lib/*",
+        "ocr/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+
+  "minimum_chrome_version": "96"
+}

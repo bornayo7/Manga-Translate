@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  popup.html — Entry point for the VisionTranslate (lensmu) browser extension popup.
+
+  HOW BROWSER EXTENSION POPUPS WORK:
+  When a user clicks the extension icon in the browser toolbar, Chrome opens this
+  HTML file as a small popup window. It behaves like a miniature web page — it has
+  its own DOM, can load scripts, and can communicate with the background service
+  worker and content scripts via Chrome's messaging APIs.
+
+  KEY CONSTRAINTS:
+  - The popup is destroyed every time it closes (no persistent state in memory).
+  - We store all settings in chrome.storage.local so they survive popup close/reopen.
+  - The popup cannot directly access the current web page's DOM. It must send
+    messages to the content script (injected into the page) to trigger actions.
+  - Inline scripts are blocked by Chrome's Content Security Policy (CSP) for
+    extensions using Manifest V3, so all JS must be in external files.
+-->
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VisionTranslate Settings</title>
+
+  <!--
+    CSS is imported via index.jsx and bundled by Vite automatically.
+    No manual <link> tag needed — Vite injects it into the built HTML.
+  -->
+
+  <!--
+    Fixed dimensions for the popup. Chrome allows popups up to ~800x600, but
+    a narrower width feels more natural. Height is auto so content can grow,
+    but we set a max-height to prevent the popup from becoming too tall.
+  -->
+  <style>
+    html, body {
+      width: 420px;
+      min-height: 200px;
+      max-height: 640px;
+      margin: 0;
+      padding: 0;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <!--
+    React mounts into this div. We keep the HTML minimal — all UI is built
+    in React components so we get reactive state management for settings.
+  -->
+  <div id="root"></div>
+
+  <!--
+    The bundled React application. If using a bundler, this path points to
+    the output bundle. For development with Vite, you would instead use a
+    <script type="module" src="./index.jsx"> tag.
+  -->
+  <script src="./index.jsx" type="module"></script>
+</body>
+</html>

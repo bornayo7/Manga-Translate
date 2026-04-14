@@ -1,0 +1,38 @@
+# =============================================================================
+# VisionTranslate — OCR Engine Dependencies (optional)
+# =============================================================================
+#
+# These are separated from the core requirements because PaddlePaddle has
+# platform-specific installation steps and doesn't support all Python versions.
+#
+# COMPATIBILITY:
+#   - PaddlePaddle supports Python 3.8–3.12 (as of 2025).
+#     Python 3.13+ is NOT yet supported. If you're on 3.13+, skip PaddleOCR
+#     and use Tesseract.js (in-browser) or Google Cloud Vision instead.
+#   - manga-ocr requires Python 3.8–3.12 and PyTorch.
+#
+# INSTALL PADDLEPADDLE (pick ONE based on your platform):
+#
+#   macOS (Apple Silicon / Intel):
+#     pip install paddlepaddle==2.6.2 -f https://www.paddlepaddle.org.cn/whl/mac/cpu/paddlepaddle.html
+#
+#   Linux (CPU only):
+#     pip install paddlepaddle==2.6.2
+#
+#   Linux (NVIDIA GPU — much faster, requires CUDA 11.8+):
+#     pip install paddlepaddle-gpu==2.6.2
+#
+#   Windows (CPU only):
+#     pip install paddlepaddle==2.6.2
+#
+# THEN install PaddleOCR and MangaOCR:
+#   pip install paddleocr>=2.7.0 manga-ocr>=0.1.8
+#
+# FIRST-RUN MODEL DOWNLOADS:
+#   - PaddleOCR downloads detection + recognition models (~100 MB) on first use.
+#   - MangaOCR downloads a ~400 MB model (fine-tuned Vision Encoder-Decoder).
+#   These are cached, so subsequent runs are fast.
+# =============================================================================
+
+paddleocr>=2.7.0          # general-purpose OCR (supports 80+ languages)
+manga-ocr>=0.1.8          # specialized Japanese manga text recognition

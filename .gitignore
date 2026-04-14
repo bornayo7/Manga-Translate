@@ -1,0 +1,20 @@
+# Node
+node_modules/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+venv*/
+env/
+.env
+
+# Build output (rebuilt with npm run build)
+lensmu/extension/dist/
+lensmu/website/.next/
+
+# IDE
+.vscode/
+.idea/
