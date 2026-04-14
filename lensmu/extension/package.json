@@ -5,14 +5,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "BUILD_TARGET=popup vite build --watch",
+    "dev": "cross-env BUILD_TARGET=popup vite build --watch",
     "build": "npm run build:popup && npm run build:overlay",
-    "build:popup": "BUILD_TARGET=popup vite build",
-    "build:overlay": "BUILD_TARGET=overlay vite build",
-    "watch": "concurrently --names popup,overlay --prefix-colors blue,green \"BUILD_TARGET=popup vite build --watch\" \"BUILD_TARGET=overlay vite build --watch\"",
-    "watch:popup": "BUILD_TARGET=popup vite build --watch",
-    "watch:overlay": "BUILD_TARGET=overlay vite build --watch",
-    "clean": "rm -rf dist"
+    "build:popup": "cross-env BUILD_TARGET=popup vite build",
+    "build:overlay": "cross-env BUILD_TARGET=overlay vite build",
+    "watch": "concurrently --names popup,overlay --prefix-colors blue,green \"cross-env BUILD_TARGET=popup vite build --watch\" \"cross-env BUILD_TARGET=overlay vite build --watch\"",
+    "watch:popup": "cross-env BUILD_TARGET=popup vite build --watch",
+    "watch:overlay": "cross-env BUILD_TARGET=overlay vite build --watch",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "dependencies": {
     "react": "^18.2.0",
@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
+    "cross-env": "^7.0.3",
     "vite": "^5.4.0",
     "concurrently": "^9.0.1"
   },
