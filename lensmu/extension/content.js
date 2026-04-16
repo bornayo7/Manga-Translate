@@ -115,6 +115,8 @@ let imageProcessIds = new WeakMap();
  *   sourceKey: string,
  *   settingsSignature: string,
  *   imageInfo: { element, type, url },
+ *   activeJob: { id: string, controller: AbortController, reason: string } | null,
+ *   lastJobResult: 'idle' | 'running' | 'prepared' | 'rendered' | 'failed' | 'cancelled' | 'skipped',
  *   prepared: {
  *     imageBase64,
  *     rawOcrResults,
@@ -225,6 +227,49 @@ function getReadAloudSettingsSignature(settings = currentSettings) {
   });
 }
 
+function isConnectedElement(element) {
+  return Boolean(element && element.isConnected);
+}
+
+function hasLiveExtensionContext() {
+  try {
+    return Boolean(globalThis.chrome?.runtime?.id);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isExtensionContextInvalidated(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+
+  return (
+    message.includes('extension context invalidated') ||
+    message.includes('context invalidated') ||
+    message.includes('receiving end does not exist') ||
+    message.includes('the message port closed before a response was received')
+  );
+}
+
+function isLifecycleCancellationError(error) {
+  return error?.name === 'AbortError' || isExtensionContextInvalidated(error);
+}
+
+async function safeSendMessage(message) {
+  if (!hasLiveExtensionContext()) {
+    throw new Error('Extension context invalidated');
+  }
+
+  try {
+    return await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    if (!hasLiveExtensionContext() || isExtensionContextInvalidated(error)) {
+      throw new Error('Extension context invalidated');
+    }
+
+    throw error;
+  }
+}
+
 function getTranslateControl(imageElement) {
   for (const control of translateIcons) {
     if (control.element === imageElement) {
@@ -276,8 +321,12 @@ function clearTranslationFailureNotice(imageElement) {
 }
 
 function showTranslationFailureNotice(imageElement, message) {
+  if (!isConnectedElement(imageElement)) {
+    return;
+  }
+
   const control = getTranslateControl(imageElement);
-  if (!control) {
+  if (!control?.iconContainer?.isConnected) {
     console.warn('[VisionTranslate Content] Unable to show translation failure notice', {
       message
     });
@@ -360,7 +409,7 @@ async function syncReadAloudTranslationCache(imageFingerprint, translationHash) 
   }
 
   try {
-    await chrome.runtime.sendMessage({
+    await safeSendMessage({
       action: 'SYNC_READ_ALOUD_TRANSLATION',
       payload: {
         imageFingerprint,
@@ -368,7 +417,13 @@ async function syncReadAloudTranslationCache(imageFingerprint, translationHash) 
       }
     });
   } catch (error) {
-    console.warn('[VisionTranslate] Read aloud cache sync failed:', error.message);
+    const errorMessage = error?.message || String(error);
+    if (isExtensionContextInvalidated(error)) {
+      console.warn('[VisionTranslate] Read aloud cache sync cancelled:', errorMessage);
+      return;
+    }
+
+    console.warn('[VisionTranslate] Read aloud cache sync failed:', errorMessage);
   }
 }
 
@@ -397,7 +452,7 @@ async function handleReadAloudClick(imageElement) {
     let audioDataUrl = overlay.readAloud?.audioDataUrl || '';
 
     if (!audioDataUrl || overlay.readAloud?.settingsSignature !== currentSignature) {
-      const response = await chrome.runtime.sendMessage({
+      const response = await safeSendMessage({
         action: 'GENERATE_READ_ALOUD_AUDIO',
         payload: {
           text: overlay.speechText,
@@ -458,6 +513,15 @@ async function handleReadAloudClick(imageElement) {
     updateOverlayReadAloudState(imageElement, 'playing');
     await audio.play();
   } catch (error) {
+    if (isExtensionContextInvalidated(error)) {
+      console.warn('[VisionTranslate] Read aloud playback cancelled:', error?.message || String(error));
+      if (activeReadAloudSession?.imageElement === imageElement) {
+        activeReadAloudSession = null;
+      }
+      updateOverlayReadAloudState(imageElement, 'stopped');
+      return;
+    }
+
     console.error('[VisionTranslate] Read aloud playback failed:', error);
     if (activeReadAloudSession?.imageElement === imageElement) {
       activeReadAloudSession = null;
@@ -563,6 +627,10 @@ async function runBundledTesseractOCR(
   imageBase64,
   sourceLanguage = currentSettings.sourceLanguage || 'auto'
 ) {
+  if (!hasLiveExtensionContext()) {
+    throw new Error('Extension context invalidated');
+  }
+
   const { recognize } = await import(chrome.runtime.getURL('ocr/tesseract.js'));
   const results = await recognize(
     stripDataUrlPrefix(imageBase64),
@@ -671,7 +739,7 @@ async function fetchImageViaBackground(url) {
   if (!url) return null;
 
   try {
-    const fetchResponse = await chrome.runtime.sendMessage({
+    const fetchResponse = await safeSendMessage({
       action: 'FETCH_IMAGE',
       payload: { url }
     });
@@ -682,7 +750,13 @@ async function fetchImageViaBackground(url) {
 
     console.warn('[VisionTranslate] Background fetch failed:', fetchResponse?.error || 'Unknown error');
   } catch (fetchError) {
-    console.warn('[VisionTranslate] Background fetch error:', fetchError.message);
+    const errorMessage = fetchError?.message || String(fetchError);
+    if (isExtensionContextInvalidated(fetchError)) {
+      console.warn('[VisionTranslate] Background fetch cancelled:', errorMessage);
+      throw fetchError;
+    }
+
+    console.warn('[VisionTranslate] Background fetch error:', errorMessage);
   }
 
   return null;
@@ -847,9 +921,113 @@ function createImageState(imageInfo) {
     sourceKey: getImageSourceKey(imageInfo),
     settingsSignature: '',
     imageInfo,
+    activeJob: null,
+    lastJobResult: 'idle',
     prepared: null,
     preparePromise: null
   };
+}
+
+function cancelImageTranslationJob(imageState, reason = 'translation-cancelled') {
+  const activeJob = imageState?.activeJob;
+  const element = imageState?.imageInfo?.element;
+
+  if (!activeJob) {
+    return;
+  }
+
+  if (!activeJob.controller.signal.aborted) {
+    activeJob.controller.abort(reason);
+  }
+
+  if (element && imageProcessIds.get(element) === activeJob.id) {
+    imageProcessIds.delete(element);
+  }
+
+  if (imageState.activeJob === activeJob) {
+    imageState.activeJob = null;
+
+    if (imageState.lastJobResult === 'running') {
+      imageState.lastJobResult = 'cancelled';
+    }
+  }
+}
+
+function startImageTranslationJob(imageState, reason = 'translation-started') {
+  cancelImageTranslationJob(imageState, reason);
+
+  const job = {
+    id: `${Date.now()}-${Math.random()}`,
+    controller: new AbortController(),
+    reason
+  };
+
+  imageState.activeJob = job;
+  imageState.lastJobResult = 'running';
+
+  if (imageState.imageInfo?.element) {
+    imageProcessIds.set(imageState.imageInfo.element, job.id);
+  }
+
+  return job;
+}
+
+function isCurrentImageTranslationJob(imageState, job) {
+  const element = imageState?.imageInfo?.element;
+
+  return Boolean(
+    job &&
+    element &&
+    imageState.activeJob === job &&
+    imageProcessIds.get(element) === job.id &&
+    !job.controller.signal.aborted
+  );
+}
+
+function cancelImageTranslationJobResult(imageState, job, reason = 'translation-cancelled') {
+  if (job && !job.controller.signal.aborted) {
+    job.controller.abort(reason);
+  }
+
+  if (imageState) {
+    imageState.lastJobResult = 'cancelled';
+  }
+
+  if (imageState?.activeJob === job) {
+    const element = imageState.imageInfo?.element;
+
+    if (element && imageProcessIds.get(element) === job.id) {
+      imageProcessIds.delete(element);
+    }
+
+    imageState.activeJob = null;
+    imageState.lastJobResult = 'cancelled';
+  }
+
+  return null;
+}
+
+function finalizeImageTranslationJob(imageState, job, result) {
+  if (!isCurrentImageTranslationJob(imageState, job)) {
+    return;
+  }
+
+  const element = imageState.imageInfo?.element;
+
+  if (element) {
+    imageProcessIds.delete(element);
+  }
+
+  imageState.activeJob = null;
+  imageState.lastJobResult = result;
+}
+
+function shouldCancelImageTranslationJob(imageState, job) {
+  return (
+    !hasLiveExtensionContext() ||
+    !isConnectedElement(imageState?.imageInfo?.element) ||
+    !isCurrentImageTranslationJob(imageState, job)
+  );
 }
 
 function ensureImageState(imageInfo) {
@@ -881,7 +1059,12 @@ function invalidateImageState(imageElement, reason = 'invalidated') {
   const imageState = imageStates.get(imageElement);
   const control = getTranslateControl(imageElement);
 
-  imageProcessIds.delete(imageElement);
+  if (imageState) {
+    cancelImageTranslationJob(imageState, reason);
+  } else {
+    imageProcessIds.delete(imageElement);
+  }
+
   removeOverlayForElement(imageElement);
 
   if (control) {
@@ -896,6 +1079,8 @@ function invalidateImageState(imageElement, reason = 'invalidated') {
   imageState.prepared = null;
   imageState.preparePromise = null;
   imageState.settingsSignature = '';
+  imageState.activeJob = null;
+  imageState.lastJobResult = 'idle';
   setImageLifecycleState(imageState, 'icon-ready', { reason });
 }
 
@@ -1256,6 +1441,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
   const isPrefetch = options.reason === 'prefetch';
   const settingsSnapshot = { ...(currentSettings || {}) };
   const settingsSignature = getTranslationSettingsSignature(settingsSnapshot);
+  let currentJob = null;
 
   if (
     imageState.prepared &&
@@ -1277,6 +1463,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       blockOverlayRenderBecauseNoClick(imageState, 'cached-prefetch-result');
     }
 
+    imageState.lastJobResult = 'prepared';
     return imageState.prepared;
   }
 
@@ -1291,25 +1478,55 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
   );
 
   imageState.settingsSignature = settingsSignature;
-  imageState.preparePromise = (async () => {
+  let preparePromise = null;
+  preparePromise = (async () => {
     let imageBase64 = null;
-    const currentRunId = Date.now() + Math.random();
     const prefersBackgroundFetch = isCrossOriginHttpUrl(url);
+    const createFailureResult = (result = 'failed') => {
+      finalizeImageTranslationJob(imageState, currentJob, result);
+      return null;
+    };
+    const bailIfJobStopped = (reason) => {
+      if (shouldCancelImageTranslationJob(imageState, currentJob)) {
+        return cancelImageTranslationJobResult(imageState, currentJob, reason);
+      }
 
-    imageProcessIds.set(element, currentRunId);
+      return undefined;
+    };
+
+    currentJob = startImageTranslationJob(
+      imageState,
+      isPrefetch ? 'background-preprocess-started' : 'click-translation-started'
+    );
+
+    if (bailIfJobStopped('translation-start-cancelled') === null) {
+      return null;
+    }
 
     if (type === 'canvas') {
       try {
         imageBase64 = element.toDataURL('image/png');
       } catch (e) {
         console.warn('[VisionTranslate] Cannot export canvas (tainted):', e.message);
-        return null;
+        return createFailureResult();
       }
     } else if (prefersBackgroundFetch) {
+      if (bailIfJobStopped('background-fetch-cancelled') === null) {
+        return null;
+      }
       imageBase64 = await fetchImageViaBackground(url);
+      if (bailIfJobStopped('background-fetch-cancelled') === null) {
+        return null;
+      }
     } else if (type === 'background') {
       try {
+        if (bailIfJobStopped('background-image-load-cancelled') === null) {
+          return null;
+        }
         const loadedImg = await loadImage(url);
+        if (bailIfJobStopped('background-image-load-cancelled') === null) {
+          return null;
+        }
         imageBase64 = imageToBase64(loadedImg);
       } catch (e) {
         console.warn('[VisionTranslate] Could not load background image via CORS, trying background fetch:', url?.substring(0, 80));
@@ -1319,15 +1536,25 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
     }
 
     if (!imageBase64 && url) {
+      if (bailIfJobStopped('fallback-background-fetch-cancelled') === null) {
+        return null;
+      }
       imageBase64 = await fetchImageViaBackground(url);
+      if (bailIfJobStopped('fallback-background-fetch-cancelled') === null) {
+        return null;
+      }
     }
 
     if (!imageBase64) {
       console.warn('[VisionTranslate] Failed to convert image to base64. Skipping.');
+      return createFailureResult();
+    }
+
+    if (bailIfJobStopped('ocr-request-cancelled') === null) {
       return null;
     }
 
-    const ocrResponse = await chrome.runtime.sendMessage({
+    const ocrResponse = await safeSendMessage({
       action: 'OCR_REQUEST',
       payload: {
         imageBase64,
@@ -1336,8 +1563,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       }
     });
 
-    if (imageProcessIds.get(element) !== currentRunId) {
-      console.log('[VisionTranslate] Aborting stale OCR processing.');
+    if (bailIfJobStopped('ocr-response-stale') === null) {
       return null;
     }
 
@@ -1349,7 +1575,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
           `Translation failed: ${ocrResponse?.body?.error || 'OCR request failed.'}`
         );
       }
-      return null;
+      return createFailureResult();
     }
 
     let rawOcrResults = ocrResponse.body?.blocks || [];
@@ -1357,19 +1583,25 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       const sourceLang = ocrResponse.body?.source_lang || settingsSnapshot.sourceLanguage || 'auto';
       console.log('[VisionTranslate] Running bundled Tesseract OCR in content script.');
       try {
+        if (bailIfJobStopped('client-ocr-cancelled') === null) {
+          return null;
+        }
         rawOcrResults = await runBundledTesseractOCR(imageBase64, sourceLang);
+        if (bailIfJobStopped('client-ocr-cancelled') === null) {
+          return null;
+        }
       } catch (tessError) {
         console.warn('[VisionTranslate] Bundled Tesseract.js OCR failed:', tessError.message);
         if (!isPrefetch) {
           showTranslationFailureNotice(element, `Translation failed: ${tessError.message}`);
         }
-        return null;
+        return createFailureResult();
       }
     }
 
     if (rawOcrResults.length === 0) {
       console.log('[VisionTranslate] No text found in image. Skipping.');
-      return null;
+      return createFailureResult('skipped');
     }
 
     console.log(`[VisionTranslate] OCR found ${rawOcrResults.length} raw text boxes`);
@@ -1384,12 +1616,20 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       }))
     });
 
+    if (bailIfJobStopped('overlay-module-load-cancelled') === null) {
+      return null;
+    }
+
     const overlayModule = await import(chrome.runtime.getURL('overlay.js'));
+    if (bailIfJobStopped('overlay-module-load-cancelled') === null) {
+      return null;
+    }
+
     const mergedOcrResults = overlayModule.groupTextBlocks(rawOcrResults);
 
     if (mergedOcrResults.length === 0) {
       console.log('[VisionTranslate] OCR merge step produced no renderable text blocks. Skipping.');
-      return null;
+      return createFailureResult('skipped');
     }
 
     console.log(
@@ -1409,7 +1649,11 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       }))
     });
 
-    const translateResponse = await chrome.runtime.sendMessage({
+    if (bailIfJobStopped('translation-request-cancelled') === null) {
+      return null;
+    }
+
+    const translateResponse = await safeSendMessage({
       action: 'TRANSLATE_REQUEST',
       payload: {
         texts: textsToTranslate,
@@ -1419,8 +1663,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       }
     });
 
-    if (imageProcessIds.get(element) !== currentRunId) {
-      console.log('[VisionTranslate] Aborting stale translation preparation.');
+    if (bailIfJobStopped('translation-response-stale') === null) {
       return null;
     }
 
@@ -1445,7 +1688,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (!isPrefetch) {
         showTranslationFailureNotice(element, `Translation failed: ${failureMessage}`);
       }
-      return null;
+      return createFailureResult();
     }
 
     const translations = translateResponse.body?.translations || [];
@@ -1467,7 +1710,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (!isPrefetch) {
         showTranslationFailureNotice(element, 'Translation failed: incomplete provider response.');
       }
-      return null;
+      return createFailureResult();
     }
 
     const translationEntries = mergedOcrResults.map((block, index) => {
@@ -1496,7 +1739,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (!isPrefetch) {
         showTranslationFailureNotice(element, 'Translation failed: provider returned no translated text.');
       }
-      return null;
+      return createFailureResult();
     }
 
     if (languagesClearlyDiffer(translatedSourceLanguage, targetLanguage) && allTranslationsMatchSource) {
@@ -1516,7 +1759,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (!isPrefetch) {
         showTranslationFailureNotice(element, 'Translation failed: output matched the source text.');
       }
-      return null;
+      return createFailureResult();
     }
 
     console.log('[VisionTranslate Content] Final text passed to overlay rendering', {
@@ -1535,13 +1778,22 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
     });
 
     const speechText = overlayModule.buildSpeechText(mergedOcrResults, translations);
+    if (bailIfJobStopped('translation-hash-cancelled') === null) {
+      return null;
+    }
+
     const imageFingerprint = await sha256Hex(stripDataUrlPrefix(imageBase64));
+    if (bailIfJobStopped('translation-hash-cancelled') === null) {
+      return null;
+    }
+
     const translationHash = await sha256Hex(`${targetLanguage}::${speechText}`);
+    if (bailIfJobStopped('translation-hash-cancelled') === null) {
+      return null;
+    }
 
     await syncReadAloudTranslationCache(imageFingerprint, translationHash);
-
-    if (imageProcessIds.get(element) !== currentRunId) {
-      console.log('[VisionTranslate] Aborting stale prepared result.');
+    if (bailIfJobStopped('read-aloud-cache-sync-cancelled') === null) {
       return null;
     }
 
@@ -1570,6 +1822,10 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       }
     );
 
+    if (isCurrentImageTranslationJob(imageState, currentJob)) {
+      imageState.lastJobResult = 'prepared';
+    }
+
     if (isPrefetch && !imageState.clicked) {
       blockOverlayRenderBecauseNoClick(imageState, 'background-preprocess-finished');
     }
@@ -1577,33 +1833,51 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
     return prepared;
   })()
     .catch((error) => {
+      if (isLifecycleCancellationError(error) || !hasLiveExtensionContext()) {
+        console.warn('[VisionTranslate] Image translation preparation cancelled:', error?.message || String(error));
+        return cancelImageTranslationJobResult(imageState, currentJob, 'translation-preparation-cancelled');
+      }
+
       console.error('[VisionTranslate] Error preparing image translation:', error);
 
       if (!isPrefetch) {
-        showTranslationFailureNotice(
-          element,
-          `Translation failed: ${error.message || 'Unexpected error.'}`
-        );
+        const errorMessage = error?.message || String(error) || 'Unexpected error.';
 
-        chrome.runtime.sendMessage({
+        if (isConnectedElement(element)) {
+          showTranslationFailureNotice(
+            element,
+            `Translation failed: ${errorMessage}`
+          );
+        }
+
+        void safeSendMessage({
           action: 'FATAL_ERROR',
           payload: {
-            errorMessage: `Failed to translate image: ${error.message}`
+            errorMessage: `Failed to translate image: ${errorMessage}`
+          }
+        }).catch((reportError) => {
+          if (!isExtensionContextInvalidated(reportError)) {
+            console.warn('[VisionTranslate] Fatal error report failed:', reportError?.message || String(reportError));
           }
         });
       }
 
+      finalizeImageTranslationJob(imageState, currentJob, 'failed');
       return null;
     })
     .finally(() => {
-      imageState.preparePromise = null;
+      if (imageState.preparePromise === preparePromise) {
+        imageState.preparePromise = null;
+      }
     });
 
-  return imageState.preparePromise;
+  imageState.preparePromise = preparePromise;
+  return preparePromise;
 }
 
 async function renderPreparedImage(imageInfo, prepared, options = {}) {
   const imageState = ensureImageState(imageInfo);
+  const renderJob = options.job || null;
 
   if (!imageState.clicked) {
     blockOverlayRenderBecauseNoClick(imageState, 'render-request-without-click');
@@ -1614,7 +1888,29 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
     return false;
   }
 
+  if (!isConnectedElement(imageInfo.element)) {
+    if (renderJob) {
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-target-disconnected');
+    }
+
+    imageState.lastJobResult = 'cancelled';
+    return null;
+  }
+
+  if (!hasLiveExtensionContext()) {
+    if (renderJob) {
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-context-invalidated');
+    }
+
+    imageState.lastJobResult = 'cancelled';
+    return null;
+  }
+
   try {
+    if (renderJob && shouldCancelImageTranslationJob(imageState, renderJob)) {
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-job-stale');
+    }
+
     const existingOverlay = imageOverlays.get(imageInfo.element);
     const shouldShowTranslation = options.preserveVisibility
       ? existingOverlay?.showingTranslation !== false
@@ -1625,8 +1921,29 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
       blockCount: prepared.mergedOcrResults.length
     });
 
+    if (renderJob && shouldCancelImageTranslationJob(imageState, renderJob)) {
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-module-load-cancelled');
+    }
+
     const overlayModule = await import(chrome.runtime.getURL('overlay.js'));
+    if (renderJob && shouldCancelImageTranslationJob(imageState, renderJob)) {
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-module-load-cancelled');
+    }
+
     const sourceImage = await loadImage(prepared.imageBase64);
+    if (renderJob && shouldCancelImageTranslationJob(imageState, renderJob)) {
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-image-load-cancelled');
+    }
+
+    if (!isConnectedElement(imageInfo.element)) {
+      if (renderJob) {
+        return cancelImageTranslationJobResult(imageState, renderJob, 'render-target-disconnected');
+      }
+
+      imageState.lastJobResult = 'cancelled';
+      return null;
+    }
+
     const { canvas, wrapper } = createOverlay(imageInfo.element);
 
     canvas.style.opacity = shouldShowTranslation ? '1' : '0';
@@ -1669,13 +1986,40 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
     logImageLifecycle('click-triggered render completed', imageInfo, {
       blockCount: prepared.mergedOcrResults.length
     });
+
+    if (renderJob) {
+      finalizeImageTranslationJob(imageState, renderJob, 'rendered');
+    } else {
+      imageState.lastJobResult = 'rendered';
+    }
+
     return true;
   } catch (error) {
+    if (isLifecycleCancellationError(error) || !hasLiveExtensionContext() || !isConnectedElement(imageInfo.element)) {
+      console.warn('[VisionTranslate] Image render cancelled:', error?.message || String(error));
+      if (renderJob) {
+        return cancelImageTranslationJobResult(imageState, renderJob, 'render-cancelled');
+      }
+
+      imageState.lastJobResult = 'cancelled';
+      return null;
+    }
+
     console.error('[VisionTranslate] Error rendering prepared image:', error);
-    showTranslationFailureNotice(
-      imageInfo.element,
-      `Translation failed: ${error.message || 'Unexpected render error.'}`
-    );
+    if (isConnectedElement(imageInfo.element)) {
+      const errorMessage = error?.message || String(error) || 'Unexpected render error.';
+      showTranslationFailureNotice(
+        imageInfo.element,
+        `Translation failed: ${errorMessage}`
+      );
+    }
+
+    if (renderJob) {
+      finalizeImageTranslationJob(imageState, renderJob, 'failed');
+    } else {
+      imageState.lastJobResult = 'failed';
+    }
+
     return false;
   }
 }
@@ -1696,7 +2040,19 @@ async function translateImageOnClick(imageInfo) {
   }
 
   const prepared = await prepareImageForTranslation(imageInfo, { reason: 'click' });
-  return renderPreparedImage(imageInfo, prepared);
+  if (!prepared) {
+    return imageState.lastJobResult === 'cancelled' ? null : false;
+  }
+
+  const renderJob =
+    imageState.activeJob || startImageTranslationJob(imageState, 'render-prepared-image');
+  const didRender = await renderPreparedImage(imageInfo, prepared, { job: renderJob });
+
+  if (!didRender) {
+    return imageState.lastJobResult === 'cancelled' ? null : false;
+  }
+
+  return true;
 }
 
 /*
@@ -1901,16 +2257,24 @@ function addTranslateIcons() {
       }
 
       try {
-        const didTranslate = await translateImageOnClick(imageInfo);
-        if (didTranslate) {
+        const translationResult = await translateImageOnClick(imageInfo);
+        if (translationResult) {
           icon.innerHTML = '✓';
           icon.style.background = 'rgba(34, 197, 94, 0.9)';
+        } else if (translationResult === null) {
+          resetTranslateControl(getTranslateControl(imageInfo.element));
         } else {
           icon.innerHTML = '✗';
           icon.style.background = 'rgba(239, 68, 68, 0.9)';
         }
         icon.style.animation = 'none';
       } catch (err) {
+        if (isLifecycleCancellationError(err) || !hasLiveExtensionContext()) {
+          console.warn('[VisionTranslate] Single image translation cancelled:', err?.message || String(err));
+          resetTranslateControl(getTranslateControl(imageInfo.element));
+          return;
+        }
+
         /* Show error state */
         icon.innerHTML = '✗';
         icon.style.background = 'rgba(239, 68, 68, 0.9)';
@@ -1975,9 +2339,13 @@ async function processAllImages(options = { mode: 'render' }) {
   const shouldReportProgress = mode === 'render';
 
   if (shouldReportProgress) {
-    chrome.runtime.sendMessage({
+    void safeSendMessage({
       action: 'UPDATE_PROGRESS',
       payload: { total: images.length, completed: 0 }
+    }).catch((error) => {
+      if (!isExtensionContextInvalidated(error)) {
+        console.warn('[VisionTranslate] Progress update failed:', error?.message || String(error));
+      }
     });
   }
 
@@ -2008,9 +2376,13 @@ async function processAllImages(options = { mode: 'render' }) {
       completedCount++;
 
       if (shouldReportProgress) {
-        chrome.runtime.sendMessage({
+        void safeSendMessage({
           action: 'UPDATE_PROGRESS',
           payload: { total: images.length, completed: completedCount }
+        }).catch((error) => {
+          if (!isExtensionContextInvalidated(error)) {
+            console.warn('[VisionTranslate] Progress update failed:', error?.message || String(error));
+          }
         });
       }
     }

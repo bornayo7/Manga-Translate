@@ -243,6 +243,87 @@ function normalizeCustomOcrResponse(body, fallbackSourceLang = 'auto') {
   return { blocks, source_lang };
 }
 
+const OFFSCREEN_TESSERACT_DOCUMENT_PATH = 'offscreen/ocr.html';
+const OFFSCREEN_TESSERACT_TARGET = 'offscreen-tesseract';
+let offscreenTesseractCreation = null;
+
+function toErrorMessage(error, fallback = 'Unknown error') {
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) {
+    return error.message;
+  }
+
+  return fallback;
+}
+
+async function hasOffscreenTesseractDocument() {
+  const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_TESSERACT_DOCUMENT_PATH);
+
+  if (typeof chrome.runtime.getContexts === 'function') {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [offscreenUrl]
+    });
+    return contexts.length > 0;
+  }
+
+  const matchedClients = await self.clients.matchAll();
+  return matchedClients.some((client) => client.url === offscreenUrl);
+}
+
+async function ensureOffscreenTesseractDocument() {
+  if (!chrome.offscreen?.createDocument) {
+    return false;
+  }
+
+  if (await hasOffscreenTesseractDocument()) {
+    return true;
+  }
+
+  if (!offscreenTesseractCreation) {
+    offscreenTesseractCreation = chrome.offscreen.createDocument({
+      url: OFFSCREEN_TESSERACT_DOCUMENT_PATH,
+      reasons: ['WORKERS'],
+      justification: 'Run bundled Tesseract OCR in an extension-owned document so page CSP and opaque origins do not block worker creation.'
+    });
+  }
+
+  try {
+    await offscreenTesseractCreation;
+    return true;
+  } finally {
+    offscreenTesseractCreation = null;
+  }
+}
+
+async function runBundledTesseractInOffscreen(imageBase64, sourceLang = 'auto') {
+  const offscreenReady = await ensureOffscreenTesseractDocument();
+  if (!offscreenReady) {
+    throw new Error('Bundled Tesseract OCR requires Chrome offscreen documents in this browser.');
+  }
+
+  const response = await chrome.runtime.sendMessage({
+    target: OFFSCREEN_TESSERACT_TARGET,
+    action: 'RUN_TESSERACT_OCR',
+    payload: {
+      imageBase64,
+      sourceLang
+    }
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.body?.error || 'Bundled Tesseract OCR failed in the offscreen document.');
+  }
+
+  return {
+    blocks: toContentScriptBlocks(response.body?.blocks || []),
+    source_lang: sourceLang
+  };
+}
+
 /*
  * --------------------------------------------------------------------------
  * Helper: Extract Hostname from URL
@@ -577,6 +658,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
  * Chrome closes the channel immediately and sendResponse becomes a no-op.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.target === OFFSCREEN_TESSERACT_TARGET) {
+    return false;
+  }
+
   /*
    * We use an immediately-invoked async function (IIAFE) so we can use
    * await inside the listener. We return `true` at the bottom to keep
@@ -851,17 +936,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           } else {
             /*
-             * Tesseract.js needs the DOM-side Worker constructor, which is not
-             * available in the MV3 service worker. Tell the content script to
-             * run bundled Tesseract locally and keep the rest of the OCR flow
-             * unchanged.
+             * Run bundled Tesseract inside an offscreen extension document.
+             * That keeps worker creation on the extension origin instead of
+             * the page origin, which avoids CSP and opaque-origin failures on
+             * direct image documents.
              */
             const sourceLang = payload.sourceLang || settings.sourceLanguage || 'auto';
-            ocrResult = {
-              blocks: [],
-              source_lang: sourceLang,
-              useClientOCR: true
-            };
+            if (chrome.offscreen?.createDocument) {
+              ocrResult = await runBundledTesseractInOffscreen(rawImage, sourceLang);
+            } else {
+              ocrResult = {
+                blocks: [],
+                source_lang: sourceLang,
+                useClientOCR: true
+              };
+            }
           }
 
           sendResponse({ ok: true, body: ocrResult });
@@ -869,7 +958,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           console.error('[VisionTranslate] OCR error:', ocrError);
           sendResponse({
             ok: false,
-            body: { error: `OCR failed: ${ocrError.message}` }
+            body: { error: `OCR failed: ${toErrorMessage(ocrError)}` }
           });
         }
         break;

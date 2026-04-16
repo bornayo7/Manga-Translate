@@ -25,6 +25,7 @@
     "activeTab",
     "storage",
     "scripting",
+    "offscreen",
     "notifications",
     "identity"
   ],
@@ -105,5 +106,5 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
 
-  "minimum_chrome_version": "96"
+  "minimum_chrome_version": "109"
 }

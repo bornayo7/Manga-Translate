@@ -258,6 +258,10 @@ async function ensureWorkerReady(language) {
 
       // Path to the directory containing the Tesseract WASM core files.
       corePath: chrome.runtime.getURL('lib/'),
+
+      // Some sites block blob: workers through page CSP, so create the
+      // worker directly from the extension URL instead of a Blob wrapper.
+      workerBlobURL: false,
     });
 
     currentLanguage = language;
@@ -267,10 +271,11 @@ async function ensureWorkerReady(language) {
     // Reset state on failure so the next call tries again.
     worker = null;
     currentLanguage = null;
+    const errorMessage = getErrorMessage(error, 'Unknown worker startup failure');
 
     console.error('[Tesseract] Failed to initialize worker:', error);
     throw new Error(
-      `Failed to initialize Tesseract OCR for language "${language}": ${error.message}. ` +
+      `Failed to initialize Tesseract OCR for language "${language}": ${errorMessage}. ` +
       'Check your internet connection (needed for first-time language data download).'
     );
   }
@@ -300,6 +305,18 @@ async function loadTesseractLibrary() {
     'Could not load the bundled Tesseract.js library. ' +
     'Make sure the extension package still includes /lib/tesseract.esm.min.js, worker.min.js, and the tesseract-core*.wasm(.js) files.'
   );
+}
+
+function getErrorMessage(error, fallback = 'Unknown error') {
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) {
+    return error.message;
+  }
+
+  return fallback;
 }
 
 
