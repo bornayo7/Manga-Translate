@@ -13,10 +13,17 @@
 import base64
 import pytest
 from fastapi.testclient import TestClient
-from server import app
+import server
 
 
-client = TestClient(app)
+client = TestClient(server.app)
+
+TINY_PNG = (
+    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+    b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00'
+    b'\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00'
+    b'\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +47,11 @@ class TestHealthCheck:
         assert "paddle_ocr_loaded" in data
         assert "manga_ocr_available" in data
         assert "manga_ocr_loaded" in data
+        assert "manga_full_available" in data
+        assert "paddle_loaded_languages" in data
+        assert data["manga_full_available"] is (
+            data["paddle_ocr_available"] and data["manga_ocr_available"]
+        )
 
     def test_health_models_not_loaded_initially(self):
         """OCR models should not be loaded until first request."""
@@ -109,23 +121,103 @@ class TestBase64Decoding:
 
     def test_valid_base64_with_data_url_prefix(self):
         """Should handle data URL prefix gracefully."""
-        # Create a tiny valid PNG (1x1 pixel, red)
-        # This tests that the data URL prefix is stripped correctly
-        tiny_png = (
-            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
-            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00'
-            b'\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00'
-            b'\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
-        )
-        b64_with_prefix = "data:image/png;base64," + base64.b64encode(tiny_png).decode()
+        b64_with_prefix = "data:image/png;base64," + base64.b64encode(TINY_PNG).decode()
+        assert server.decode_base64_image(b64_with_prefix) == TINY_PNG
 
+    def test_invalid_base64_is_rejected_strictly(self):
+        with pytest.raises(Exception) as error:
+            server.decode_base64_image("not-valid-base64!!!")
+        assert error.value.status_code == 400
+
+
+class TestPaddleLanguageContract:
+    @pytest.mark.parametrize(
+        ("input_language", "expected"),
+        [("ja", "japan"), ("zh", "ch"), ("ko", "korean"), ("es", "es")],
+    )
+    def test_language_aliases(self, input_language, expected):
+        assert server.normalize_paddle_language(input_language) == expected
+
+    def test_unknown_language_is_rejected(self):
+        with pytest.raises(Exception) as error:
+            server.normalize_paddle_language("made-up-language")
+        assert error.value.status_code == 422
+
+    def test_mocked_paddle_response_and_language_routing(self, monkeypatch):
+        class FakePaddleEngine:
+            requested_language = None
+
+            @classmethod
+            def get_instance(cls, language):
+                cls.requested_language = language
+                return cls()
+
+            @classmethod
+            def get_loaded_languages(cls):
+                return []
+
+            def process_image(self, image_bytes):
+                assert image_bytes == TINY_PNG
+                return [{
+                    "text": "hola",
+                    "bbox": [1, 2, 11, 12],
+                    "confidence": 0.95,
+                    "orientation": "horizontal",
+                }]
+
+        monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
+        monkeypatch.setattr(server, "PaddleOCREngine", FakePaddleEngine)
         response = client.post(
             "/ocr/paddle",
-            json={"image": b64_with_prefix}
+            json={"image": base64.b64encode(TINY_PNG).decode(), "lang": "es"},
         )
-        # Should NOT return 400 for bad base64 — the prefix should be stripped
-        # Will return 501 if PaddleOCR isn't installed, which is fine
-        assert response.status_code != 400 or "Invalid base64" not in response.json().get("detail", "")
+
+        assert response.status_code == 200
+        assert FakePaddleEngine.requested_language == "es"
+        assert response.json()["detections"][0]["text"] == "hola"
+
+
+class TestMangaOCRContract:
+    def test_mocked_manga_response_and_region_routing(self, monkeypatch):
+        class FakeMangaEngine:
+            _instance = None
+            requested_regions = None
+
+            @classmethod
+            def get_instance(cls):
+                cls._instance = cls()
+                return cls._instance
+
+            def process_regions(self, image_bytes, bboxes):
+                assert image_bytes == TINY_PNG
+                type(self).requested_regions = bboxes
+                return [{"text": "こんにちは", "bbox": bboxes[0]}]
+
+        monkeypatch.setattr(server, "MANGA_AVAILABLE", True)
+        monkeypatch.setattr(server, "MangaOCREngine", FakeMangaEngine)
+        bbox = [0, 0, 1, 1]
+        response = client.post(
+            "/ocr/manga",
+            json={
+                "image": base64.b64encode(TINY_PNG).decode(),
+                "bboxes": [bbox],
+            },
+        )
+
+        assert response.status_code == 200
+        assert FakeMangaEngine.requested_regions == [bbox]
+        assert response.json()["detections"] == [{"text": "こんにちは", "bbox": bbox}]
+
+
+class TestRequestLimits:
+    def test_oversized_content_length_is_rejected_before_json_parsing(self):
+        response = client.post(
+            "/ocr/paddle",
+            content=b"{}",
+            headers={"Content-Length": str(16 * 1024 * 1024)},
+        )
+        assert response.status_code == 413
+        assert response.json()["code"] == "request_too_large"
 
 
 # ---------------------------------------------------------------------------
@@ -153,3 +245,10 @@ class TestCORS:
             headers={"Origin": "http://localhost:3000"},
         )
         assert "access-control-allow-origin" in response.headers
+
+    def test_cors_allows_127_loopback_dev_origin(self):
+        response = client.get(
+            "/health",
+            headers={"Origin": "http://127.0.0.1:3000"},
+        )
+        assert response.headers.get("access-control-allow-origin") == "http://127.0.0.1:3000"

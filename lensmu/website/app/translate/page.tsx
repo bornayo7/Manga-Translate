@@ -4,9 +4,9 @@ import { Navbar } from "@/components/layout/Navbar";
 import { TranslatorSection } from "@/components/sections/TranslatorSection";
 
 export const metadata: Metadata = {
-  title: "Document Translator | VisionTranslate",
+  title: "Image Translator Demo | VisionTranslate",
   description:
-    "Upload PDFs and images to detect, translate, and securely overlay text right where it belongs."
+    "Upload a JPG, PNG, or WEBP image, detect text with your local OCR backend, and redraw the translated result."
 };
 
 export default function TranslatePage() {

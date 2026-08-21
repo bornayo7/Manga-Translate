@@ -687,7 +687,7 @@ function getConfidenceBorderColor(confidence) {
   }
 }
 
-const DEBUG_RENDER_LOGS = true;
+const DEBUG_RENDER_LOGS = false;
 const DEBUG_DRAW_OVERLAYS = false;
 
 export const OCR_BLOCK_TUNING = {
@@ -1774,29 +1774,4 @@ export function restoreOriginal(canvas) {
 
   /* Clear the entire canvas to fully transparent */
   ctx.clearRect(0, 0, displayWidth, displayHeight);
-}
-
-/*
- * ==========================================================================
- * EXPORT: setupHoverDetection()
- * ==========================================================================
- * Sets up mouse hover detection on the overlay canvas. When the user
- * hovers over a translated text block, a tooltip shows the original text.
- *
- * HOW IT WORKS:
- *   1. Listen for mousemove events on the canvas.
- *   2. For each mouse position, check if it falls within any text
- *      block's bounding box.
- *   3. If yes, show a tooltip with the original text near the cursor.
- *   4. If no, hide the tooltip.
- *
- * We create a single tooltip element (shared across all blocks) and
- * reposition it as the mouse moves.
- *
- * @param {HTMLCanvasElement} canvas — The overlay canvas
- * @param {Array} ocrResults — OCR results with bounding boxes
- * @param {string[]} translations — Translated text array
- */
-export function setupHoverDetection(canvas, ocrResults, translations) {
-  // Tooltip logic removed as per user request.
 }

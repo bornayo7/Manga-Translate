@@ -94,7 +94,6 @@
         "icons/*",
         "overlay.js",
         "utils/*",
-        "dist/*",
         "lib/*",
         "ocr/*"
       ],

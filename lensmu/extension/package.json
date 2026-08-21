@@ -6,12 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "cross-env BUILD_TARGET=popup vite build --watch",
-    "build": "npm run build:popup && npm run build:overlay",
+    "build": "npm run build:popup",
     "build:popup": "cross-env BUILD_TARGET=popup vite build",
-    "build:overlay": "cross-env BUILD_TARGET=overlay vite build",
-    "watch": "concurrently --names popup,overlay --prefix-colors blue,green \"cross-env BUILD_TARGET=popup vite build --watch\" \"cross-env BUILD_TARGET=overlay vite build --watch\"",
+    "test": "node --test test/*.test.js",
+    "watch": "npm run watch:popup",
     "watch:popup": "cross-env BUILD_TARGET=popup vite build --watch",
-    "watch:overlay": "cross-env BUILD_TARGET=overlay vite build --watch",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "dependencies": {
@@ -21,12 +20,11 @@
     "tesseract.js": "^5.1.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.2.1",
+    "@vitejs/plugin-react": "^5.2.0",
     "cross-env": "^7.0.3",
-    "vite": "^5.4.0",
-    "concurrently": "^9.0.1"
+    "vite": "^8.2.2"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   }
 }

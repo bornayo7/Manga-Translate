@@ -29,7 +29,7 @@ VisionTranslate uses OCR (Optical Character Recognition) to extract text from im
 
 | Layer | Technologies |
 |-------|-------------|
-| **Extension** | JavaScript, React, Vite, Tesseract.js, Shadow DOM |
+| **Extension** | JavaScript, React, Vite, Tesseract.js, Canvas |
 | **Backend** | Python, FastAPI, PaddleOCR, MangaOCR |
 | **OCR Engines** | PaddleOCR (80+ languages), MangaOCR (Japanese), Tesseract.js (in-browser), Google Cloud Vision |
 | **Translation** | Google Translate, Gemini, OpenAI, Claude, LibreTranslate |
@@ -85,8 +85,7 @@ VisionTranslate uses OCR (Optical Character Recognition) to extract text from im
 4. The OCR engine (PaddleOCR, MangaOCR, Tesseract.js, or Cloud Vision) returns bounding boxes + recognized text.
 5. The content script sends the recognized text to the translation module (Google Translate, Gemini, OpenAI, Claude, or LibreTranslate).
 6. The translation module returns the translated text.
-7. The content script renders translated text overlays on top of each image using absolutely-positioned `<div>` elements inside a Shadow DOM (so the host page's CSS doesn't interfere).
-8. Hovering over a translated block shows the original text in a tooltip.
+7. The content script renders translated text into a dedicated canvas layered over each image, keeping the overlay isolated from the host page's layout.
 
 **Note on Tesseract.js:** The extension also bundles Tesseract.js, which runs OCR entirely in the browser (no backend needed). This is useful for quick translations but is generally less accurate than PaddleOCR for non-Latin scripts.
 
@@ -201,15 +200,6 @@ npm install
 npm run build
 ```
 
-**Windows PowerShell note:** If `npm run build` fails with `BUILD_TARGET is not recognized`, run the builds separately:
-
-```powershell
-$env:BUILD_TARGET="popup"
-npx vite build
-$env:BUILD_TARGET="overlay"
-npx vite build
-```
-
 ### Step 3: Load the extension in your browser
 
 **Chrome / Chromium / Brave / Edge:**
@@ -239,7 +229,6 @@ npx vite build
 4. **Navigate to a page with images** containing foreign-language text
 5. **Click "Translate This Page"** in the popup
 6. **Translated text appears** overlaid on the images
-7. **Hover over any translated text** to see the original in a tooltip
 8. **Click "Clear Overlays"** to remove all translations
 
 ### Tips for Best Results
@@ -288,6 +277,7 @@ Hack-SMU-VII/
       server.py                 # Server entry point, API routes
       security.py               # Rate limiting, input validation, security headers
       test_server.py            # Pytest test suite
+      requirements-dev.txt      # Server and test dependencies
       Dockerfile                # Container build file
       .dockerignore             # Docker build exclusions
       ocr_engines/              # OCR engine wrappers
@@ -308,7 +298,8 @@ Hack-SMU-VII/
         popup/                  # Popup UI (React)
           App.jsx               # Main popup component
           components/           # Settings sub-components
-        content-overlay/        # Overlay UI (React, injected into pages)
+
+      shared/                   # Canonical extension preferences
 
       ocr/                      # OCR engine clients
         ocr-manager.js          # Engine router

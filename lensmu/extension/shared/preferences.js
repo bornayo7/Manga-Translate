@@ -38,9 +38,7 @@ export const DEFAULT_EXTENSION_SETTINGS = {
   overlayMinFontSize: 10,
   overlayTextAlign: 'auto',
   darkMode: false,
-  contextSharingEnabled: false,
   prefetchTranslations: false,
-  translateOnClickOnly: true,
   overlayOpacity: 1.0
 };
 
@@ -58,6 +56,11 @@ export const LOCAL_ONLY_SETTING_KEYS = [
   'elevenLabsApiKey'
 ];
 
+export const SETTING_KEYS = Object.freeze(Object.keys(DEFAULT_EXTENSION_SETTINGS));
+export const SYNCED_PREFERENCE_KEYS = Object.freeze(
+  SETTING_KEYS.filter((key) => !LOCAL_ONLY_SETTING_KEYS.includes(key))
+);
+
 export const DEFAULT_SYNCED_PREFERENCES = Object.freeze(
   Object.fromEntries(
     Object.entries(DEFAULT_EXTENSION_SETTINGS).filter(([key]) => !LOCAL_ONLY_SETTING_KEYS.includes(key))
@@ -65,10 +68,18 @@ export const DEFAULT_SYNCED_PREFERENCES = Object.freeze(
 );
 
 export function mergeWithDefaults(partial = {}) {
-  return {
-    ...DEFAULT_EXTENSION_SETTINGS,
-    ...(partial || {})
-  };
+  const source = partial && typeof partial === 'object' && !Array.isArray(partial)
+    ? partial
+    : {};
+
+  return Object.fromEntries(
+    SETTING_KEYS.map((key) => [
+      key,
+      Object.prototype.hasOwnProperty.call(source, key)
+        ? source[key]
+        : DEFAULT_EXTENSION_SETTINGS[key]
+    ])
+  );
 }
 
 export function splitSettingsForSync(settings = {}) {
@@ -76,7 +87,8 @@ export function splitSettingsForSync(settings = {}) {
   const synced = {};
   const localOnly = {};
 
-  for (const [key, value] of Object.entries(merged)) {
+  for (const key of SETTING_KEYS) {
+    const value = merged[key];
     if (LOCAL_ONLY_SETTING_KEYS.includes(key)) {
       localOnly[key] = value;
     } else {

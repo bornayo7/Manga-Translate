@@ -55,8 +55,8 @@
  * 100x50 is a reasonable threshold: most text-containing images (manga
  * panels, screenshots, memes, infographics) are larger than this.
  */
-const MIN_IMAGE_WIDTH = 100;
-const MIN_IMAGE_HEIGHT = 50;
+const DEFAULT_MIN_IMAGE_WIDTH = 100;
+const DEFAULT_MIN_IMAGE_HEIGHT = 50;
 
 /*
  * CSS class prefix for all elements we inject into the page. Using a
@@ -69,7 +69,7 @@ const CLASS_PREFIX = 'vt-lensmu';
  * simultaneously would overwhelm both the OCR backend and the user's
  * browser with network requests and canvas rendering.
  */
-const MAX_CONCURRENT_IMAGES = 5;
+const DEFAULT_MAX_CONCURRENT_IMAGES = 5;
 
 /*
  * --------------------------------------------------------------------------
@@ -84,6 +84,51 @@ let isActive = false;
 
 /* Current extension settings (received from background on activation) */
 let currentSettings = {};
+
+function getBoundedNumberSetting(key, fallback, minimum, maximum, integer = false) {
+  const parsed = Number(currentSettings?.[key]);
+  const value = Number.isFinite(parsed) ? parsed : fallback;
+  const bounded = Math.min(maximum, Math.max(minimum, value));
+  return integer ? Math.round(bounded) : bounded;
+}
+
+function getImageDiscoveryThresholds() {
+  return {
+    minWidth: getBoundedNumberSetting(
+      'minImageWidth',
+      DEFAULT_MIN_IMAGE_WIDTH,
+      1,
+      4096,
+      true
+    ),
+    minHeight: getBoundedNumberSetting(
+      'minImageHeight',
+      DEFAULT_MIN_IMAGE_HEIGHT,
+      1,
+      4096,
+      true
+    )
+  };
+}
+
+function getMaxConcurrentImages() {
+  return getBoundedNumberSetting(
+    'maxConcurrentImages',
+    DEFAULT_MAX_CONCURRENT_IMAGES,
+    1,
+    12,
+    true
+  );
+}
+
+function getOverlayOpacity() {
+  return getBoundedNumberSetting('overlayOpacity', 1, 0, 1);
+}
+
+function setOverlayVisibility(canvas, isVisible) {
+  canvas.style.opacity = isVisible ? String(getOverlayOpacity()) : '0';
+  canvas.style.pointerEvents = isVisible ? 'auto' : 'none';
+}
 
 /*
  * Map from image element to its overlay data. We use a WeakMap so that
@@ -1107,6 +1152,7 @@ function blockOverlayRenderBecauseNoClick(imageState, reason) {
  */
 function scanForImages() {
   const results = [];
+  const { minWidth, minHeight } = getImageDiscoveryThresholds();
 
   /*
    * ---------- 1. Find all <img> tags ----------
@@ -1125,7 +1171,7 @@ function scanForImages() {
     }
 
     /* Skip images smaller than our minimum threshold */
-    if (img.naturalWidth < MIN_IMAGE_WIDTH || img.naturalHeight < MIN_IMAGE_HEIGHT) {
+    if (img.naturalWidth < minWidth || img.naturalHeight < minHeight) {
       continue;
     }
 
@@ -1164,7 +1210,7 @@ function scanForImages() {
     }
 
     /* Skip small elements */
-    if (el.offsetWidth < MIN_IMAGE_WIDTH || el.offsetHeight < MIN_IMAGE_HEIGHT) {
+    if (el.offsetWidth < minWidth || el.offsetHeight < minHeight) {
       continue;
     }
 
@@ -1191,7 +1237,7 @@ function scanForImages() {
       continue;
     }
 
-    if (canvas.width < MIN_IMAGE_WIDTH || canvas.height < MIN_IMAGE_HEIGHT) {
+    if (canvas.width < minWidth || canvas.height < minHeight) {
       continue;
     }
 
@@ -1328,8 +1374,7 @@ function createOverlay(imageElement) {
     e.stopPropagation();
 
     overlay.showingTranslation = !overlay.showingTranslation;
-    canvas.style.opacity = overlay.showingTranslation ? "1" : "0";
-    canvas.style.pointerEvents = overlay.showingTranslation ? "auto" : "none";
+    setOverlayVisibility(canvas, overlay.showingTranslation);
 
     /* Update icon if present */
     const control = getTranslateControl(imageElement);
@@ -1946,8 +1991,7 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
 
     const { canvas, wrapper } = createOverlay(imageInfo.element);
 
-    canvas.style.opacity = shouldShowTranslation ? '1' : '0';
-    canvas.style.pointerEvents = shouldShowTranslation ? 'auto' : 'none';
+    setOverlayVisibility(canvas, shouldShowTranslation);
     canvas.style.transition = 'opacity 0.2s ease';
 
     imageOverlays.set(imageInfo.element, {
@@ -1977,8 +2021,6 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
       prepared.translations,
       currentSettings
     );
-    overlayModule.setupHoverDetection(canvas, prepared.mergedOcrResults, prepared.translations);
-
     ensureReadAloudButton(imageInfo.element);
     clearTranslationFailureNotice(imageInfo.element);
 
@@ -2033,8 +2075,7 @@ async function translateImageOnClick(imageInfo) {
   const existingOverlay = imageOverlays.get(imageInfo.element);
   if (existingOverlay?.translations?.length) {
     existingOverlay.showingTranslation = true;
-    existingOverlay.canvas.style.opacity = '1';
-    existingOverlay.canvas.style.pointerEvents = 'auto';
+    setOverlayVisibility(existingOverlay.canvas, true);
     ensureReadAloudButton(imageInfo.element);
     return true;
   }
@@ -2234,8 +2275,7 @@ function addTranslateIcons() {
         imageState.clicked = true;
         setImageLifecycleState(imageState, 'clicked', { reason: 'reveal-existing-overlay' });
         overlay.showingTranslation = true;
-        overlay.canvas.style.opacity = "1";
-        overlay.canvas.style.pointerEvents = "auto";
+        setOverlayVisibility(overlay.canvas, true);
         ensureReadAloudButton(imageInfo.element);
 
         icon.innerHTML = "✓";
@@ -2397,7 +2437,8 @@ async function processAllImages(options = { mode: 'render' }) {
    * Promise.all waits for all workers to finish.
    */
   const workers = [];
-  for (let i = 0; i < Math.min(MAX_CONCURRENT_IMAGES, images.length); i++) {
+  const workerCount = Math.min(getMaxConcurrentImages(), images.length);
+  for (let i = 0; i < workerCount; i++) {
     workers.push(processNext());
   }
 
@@ -2817,6 +2858,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           previousSettings.overlayTextAlign !== currentSettings.overlayTextAlign ||
           previousSettings.showConfidenceBorders !== currentSettings.showConfidenceBorders;
 
+        const overlayOpacityChanged =
+          previousSettings.overlayOpacity !== currentSettings.overlayOpacity;
+
+        const discoverySettingsChanged =
+          previousSettings.minImageWidth !== currentSettings.minImageWidth ||
+          previousSettings.minImageHeight !== currentSettings.minImageHeight;
+
         const readAloudSettingsChanged =
           previousSettings.enableReadAloud !== currentSettings.enableReadAloud ||
           previousSettings.elevenLabsVoiceId !== currentSettings.elevenLabsVoiceId ||
@@ -2852,6 +2900,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           await Promise.all(rerenderTasks);
+        }
+
+        if (overlayOpacityChanged) {
+          for (const control of translateIcons) {
+            const overlay = imageOverlays.get(control.element);
+            if (overlay) {
+              setOverlayVisibility(overlay.canvas, overlay.showingTranslation);
+            }
+          }
+        }
+
+        if (discoverySettingsChanged) {
+          addTranslateIcons();
         }
 
         if (readAloudSettingsChanged) {

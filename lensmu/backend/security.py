@@ -5,6 +5,7 @@ import logging
 from collections import defaultdict
 from fastapi import FastAPI, HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 logger = logging.getLogger("vt.security")
 
@@ -26,6 +27,73 @@ def validate_image_size(image_bytes: bytes) -> None:
                 f"{limit_mb:.0f} MB limit."
             ),
         )
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized HTTP bodies before FastAPI parses JSON/base64 data."""
+
+    def __init__(self, app, max_body_bytes: int = MAX_REQUEST_BODY_BYTES):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        raw_content_length = headers.get(b"content-length", b"")
+        try:
+            content_length = int(raw_content_length) if raw_content_length else None
+        except ValueError:
+            content_length = None
+
+        if content_length is not None and content_length > self.max_body_bytes:
+            await self._send_too_large(scope, receive, send)
+            return
+
+        body_parts: list[bytes] = []
+        total_bytes = 0
+
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+
+            chunk = message.get("body", b"")
+            total_bytes += len(chunk)
+            if total_bytes > self.max_body_bytes:
+                await self._send_too_large(scope, receive, send)
+                return
+
+            body_parts.append(chunk)
+            if not message.get("more_body", False):
+                break
+
+        body = b"".join(body_parts)
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _send_too_large(scope, receive, send):
+        response = JSONResponse(
+            status_code=413,
+            content={
+                "detail": "Request body exceeds the configured size limit.",
+                "code": "request_too_large",
+            },
+        )
+        await response(scope, receive, send)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -84,9 +152,11 @@ def add_security_middleware(app: FastAPI) -> None:
 
     Must be called BEFORE CORS middleware (middleware runs in reverse order).
     """
-    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RequestBodyLimitMiddleware)
     app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
     logger.info(
         f"Security middleware enabled: rate limit={RATE_LIMIT_MAX_REQUESTS} "
-        f"req/{RATE_LIMIT_WINDOW_SECONDS}s, max image={MAX_IMAGE_SIZE_BYTES // (1024*1024)} MB"
+        f"req/{RATE_LIMIT_WINDOW_SECONDS}s, max image={MAX_IMAGE_SIZE_BYTES // (1024*1024)} MB, "
+        f"max request={MAX_REQUEST_BODY_BYTES // (1024*1024)} MB"
     )

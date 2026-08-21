@@ -1,23 +1,20 @@
 // VisionTranslate — Vite build config
 //
-// Two build targets (BUILD_TARGET env var):
-//   popup   -> dist/popup/   (React popup UI)
-//   overlay -> dist/         (single-file IIFE injected by content.js)
+// Builds the React popup. The webpage overlay is implemented by content.js
+// and overlay.js directly, so there is intentionally no second React bundle.
 
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { resolve } from "path";
-
-const buildTarget = process.env.BUILD_TARGET || "popup";
+import { resolve } from "node:path";
 
 function popupConfig() {
   return defineConfig({
     plugins: [react()],
     // Relative paths so the extension can resolve assets from the HTML file.
     base: './',
-    root: resolve(__dirname, "src/popup"),
+    root: resolve(import.meta.dirname, "src/popup"),
     build: {
-      outDir: resolve(__dirname, "dist/popup"),
+      outDir: resolve(import.meta.dirname, "dist/popup"),
       emptyOutDir: true,
       // Stable file names (no hashes) because manifest.json refs them by name.
       rollupOptions: {
@@ -32,34 +29,4 @@ function popupConfig() {
   });
 }
 
-function overlayConfig() {
-  return defineConfig({
-    plugins: [react()],
-    build: {
-      outDir: resolve(__dirname, "dist"),
-      emptyOutDir: false,
-      lib: {
-        entry: resolve(__dirname, "src/content-overlay/index.jsx"),
-        formats: ["iife"],
-        fileName: () => "content-overlay.js",
-        name: "VisionTranslateOverlay",
-      },
-      rollupOptions: {
-        output: {
-          // Content scripts can't load separate chunks.
-          inlineDynamicImports: true,
-          assetFileNames: "content-overlay.[ext]",
-        },
-      },
-      cssCodeSplit: false,
-      target: "es2020",
-      sourcemap: false,
-      chunkSizeWarningLimit: 1500,
-    },
-    define: {
-      "process.env.NODE_ENV": JSON.stringify("production"),
-    },
-  });
-}
-
-export default buildTarget === "overlay" ? overlayConfig() : popupConfig();
+export default popupConfig();

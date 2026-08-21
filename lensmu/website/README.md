@@ -8,7 +8,7 @@ links for team GitHub and LinkedIn profiles.
 
 ## Tech Stack
 
-- Next.js 14 with the App Router
+- Next.js 16 with the App Router
 - TypeScript
 - Tailwind CSS
 - shadcn/ui-style local components
@@ -63,9 +63,12 @@ npm run dev
 
 Open `http://localhost:3000` in your browser.
 
+Node.js 20.9 or newer is required.
+
 ## Build
 
 ```bash
+npm run lint
 npm run build
 npm run start
 ```

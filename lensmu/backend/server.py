@@ -8,6 +8,8 @@
 #   # API docs at http://localhost:8000/docs
 
 import base64
+import binascii
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -67,6 +69,12 @@ class PaddleOCRRequest(BaseModel):
         ...,
         description="Base64-encoded image (PNG/JPEG/WebP). No data-URL prefix.",
     )
+    lang: str = Field(
+        default="japan",
+        min_length=2,
+        max_length=32,
+        description="PaddleOCR language code, for example en, es, japan, korean, or ch.",
+    )
 
 
 class PaddleOCRDetection(BaseModel):
@@ -110,6 +118,8 @@ class HealthResponse(BaseModel):
     paddle_ocr_loaded: bool
     manga_ocr_available: bool
     manga_ocr_loaded: bool
+    manga_full_available: bool
+    paddle_loaded_languages: list[str]
 
 
 # -- App lifespan --------------------------------------------------------------
@@ -155,6 +165,9 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:8080",
         "http://127.0.0.1",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8080",
     ],
     allow_origin_regex=r"^(chrome-extension|moz-extension)://.*$",
     allow_credentials=True,
@@ -165,14 +178,49 @@ app.add_middleware(
 
 # -- Helpers -------------------------------------------------------------------
 
+PADDLE_INFERENCE_SEMAPHORE = asyncio.Semaphore(1)
+MANGA_INFERENCE_SEMAPHORE = asyncio.Semaphore(1)
+PADDLE_LANGUAGE_ALIASES = {
+    "auto": "japan",
+    "ja": "japan",
+    "jp": "japan",
+    "zh": "ch",
+    "zh-cn": "ch",
+    "zh-tw": "chinese_cht",
+    "ko": "korean",
+}
+PADDLE_SUPPORTED_LANGUAGES = {
+    "ch",
+    "chinese_cht",
+    "de",
+    "en",
+    "es",
+    "fr",
+    "japan",
+    "korean",
+}
+
+
+def normalize_paddle_language(language: str) -> str:
+    normalized = str(language or "japan").strip().lower()
+    resolved = PADDLE_LANGUAGE_ALIASES.get(normalized, normalized)
+    if resolved not in PADDLE_SUPPORTED_LANGUAGES:
+        supported = ", ".join(sorted(PADDLE_SUPPORTED_LANGUAGES))
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported PaddleOCR language '{language}'. Supported values: {supported}.",
+        )
+    return resolved
+
 def decode_base64_image(base64_string: str) -> bytes:
     """Decode a base64 string to raw image bytes, stripping data-URL prefix if present."""
     if "," in base64_string:
         base64_string = base64_string.split(",", 1)[1]
 
     try:
-        return base64.b64decode(base64_string)
-    except Exception as e:
+        normalized = "".join(base64_string.split())
+        return base64.b64decode(normalized, validate=True)
+    except (ValueError, binascii.Error) as e:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid base64 image data: {e}",
@@ -183,12 +231,17 @@ def decode_base64_image(base64_string: str) -> bytes:
 
 @app.get("/health", response_model=HealthResponse, summary="Health check")
 async def health_check() -> HealthResponse:
+    loaded_languages = (
+        PaddleOCREngine.get_loaded_languages() if PADDLE_AVAILABLE else []
+    )
     return HealthResponse(
         status="ok",
         paddle_ocr_available=PADDLE_AVAILABLE,
-        paddle_ocr_loaded=PADDLE_AVAILABLE and PaddleOCREngine._instance is not None,
+        paddle_ocr_loaded=bool(loaded_languages),
         manga_ocr_available=MANGA_AVAILABLE,
         manga_ocr_loaded=MANGA_AVAILABLE and MangaOCREngine._instance is not None,
+        manga_full_available=PADDLE_AVAILABLE and MANGA_AVAILABLE,
+        paddle_loaded_languages=loaded_languages,
     )
 
 
@@ -201,21 +254,18 @@ async def paddle_ocr(request: PaddleOCRRequest) -> PaddleOCRResponse:
         )
 
     start_time = time.time()
+    language = normalize_paddle_language(request.lang)
     image_bytes = decode_base64_image(request.image)
     validate_image_size(image_bytes)
 
     try:
-        engine = PaddleOCREngine.get_instance()
-    except Exception as e:
-        logger.error(f"Failed to initialize PaddleOCR: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initialize PaddleOCR: {e}")
-
-    try:
-        detections = engine.process_image(image_bytes)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        async with PADDLE_INFERENCE_SEMAPHORE:
+            engine = await asyncio.to_thread(PaddleOCREngine.get_instance, language)
+            detections = await asyncio.to_thread(engine.process_image, image_bytes)
     except Exception as e:
         logger.error(f"PaddleOCR processing failed: {e}")
+        if isinstance(e, ValueError):
+            raise HTTPException(status_code=400, detail=str(e)) from e
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {e}")
 
     elapsed_ms = (time.time() - start_time) * 1000
@@ -248,17 +298,17 @@ async def manga_ocr(request: MangaOCRRequest) -> MangaOCRResponse:
     validate_image_size(image_bytes)
 
     try:
-        engine = MangaOCREngine.get_instance()
-    except Exception as e:
-        logger.error(f"Failed to initialize MangaOCR: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initialize MangaOCR: {e}")
-
-    try:
-        detections = engine.process_regions(image_bytes, request.bboxes)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        async with MANGA_INFERENCE_SEMAPHORE:
+            engine = await asyncio.to_thread(MangaOCREngine.get_instance)
+            detections = await asyncio.to_thread(
+                engine.process_regions,
+                image_bytes,
+                request.bboxes,
+            )
     except Exception as e:
         logger.error(f"MangaOCR processing failed: {e}")
+        if isinstance(e, ValueError):
+            raise HTTPException(status_code=400, detail=str(e)) from e
         raise HTTPException(status_code=500, detail=f"MangaOCR processing failed: {e}")
 
     elapsed_ms = (time.time() - start_time) * 1000

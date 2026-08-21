@@ -33,9 +33,7 @@ export type ExtensionSettings = {
   overlayMinFontSize: number;
   overlayTextAlign: string;
   darkMode: boolean;
-  contextSharingEnabled: boolean;
   prefetchTranslations: boolean;
-  translateOnClickOnly: boolean;
   overlayOpacity: number;
 };
 
@@ -57,6 +55,8 @@ export type SyncedPreferences = Omit<ExtensionSettings, LocalOnlySettingKey>;
 export const PREFERENCE_SCHEMA_VERSION: 1;
 export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings;
 export const LOCAL_ONLY_SETTING_KEYS: readonly LocalOnlySettingKey[];
+export const SETTING_KEYS: readonly (keyof ExtensionSettings)[];
+export const SYNCED_PREFERENCE_KEYS: readonly (keyof SyncedPreferences)[];
 export const DEFAULT_SYNCED_PREFERENCES: Readonly<SyncedPreferences>;
 
 export function mergeWithDefaults(

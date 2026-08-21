@@ -1,4 +1,4 @@
-import { CheckCircle2, Chrome, Play, Users } from "lucide-react";
+import { Chrome, Users } from "lucide-react";
 import Image from "next/image";
 
 import { Button } from "@/components/ui/button";

@@ -38,6 +38,7 @@ import inspect
 import logging
 import os
 import threading
+from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
@@ -77,9 +78,11 @@ class PaddleOCREngine:
     # (this can happen if two HTTP requests arrive at the same time before
     # the model is loaded).
     _instance: Optional["PaddleOCREngine"] = None
+    _instances: "OrderedDict[str, PaddleOCREngine]" = OrderedDict()
     _lock: threading.Lock = threading.Lock()
+    _max_cached_languages = 2
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "japan") -> None:
         """
         Initialize PaddleOCR with settings optimized for manga/comic text.
 
@@ -98,26 +101,46 @@ class PaddleOCREngine:
             Useful for manga where text can be close to bubble edges.
           - show_log=False     : Suppress PaddleOCR's verbose startup logs.
         """
-        logger.info("Initializing PaddleOCR engine (this may take a few seconds)...")
-        paddle_kwargs = self._build_constructor_kwargs()
+        self.language = language
+        logger.info(
+            "Initializing PaddleOCR engine for '%s' (this may take a few seconds)...",
+            language,
+        )
+        paddle_kwargs = self._build_constructor_kwargs(language)
         self._ocr = PaddleOCR(**paddle_kwargs)
-        logger.info("PaddleOCR engine initialized successfully.")
+        logger.info("PaddleOCR engine for '%s' initialized successfully.", language)
 
     @classmethod
-    def get_instance(cls) -> "PaddleOCREngine":
+    def get_instance(cls, language: str = "japan") -> "PaddleOCREngine":
         """
         Return the singleton PaddleOCREngine instance, creating it on first call.
 
         Thread-safe: uses a lock so that if two requests arrive simultaneously
         before the model is loaded, only one will create the instance.
         """
-        if cls._instance is None:
-            with cls._lock:
-                # Double-check inside the lock (another thread may have created
-                # the instance while we were waiting for the lock).
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
+        normalized_language = str(language or "japan").strip().lower()
+        with cls._lock:
+            instance = cls._instances.get(normalized_language)
+            if instance is None:
+                instance = cls(normalized_language)
+                cls._instances[normalized_language] = instance
+                while len(cls._instances) > cls._max_cached_languages:
+                    evicted_language, _ = cls._instances.popitem(last=False)
+                    logger.info(
+                        "Evicted cached PaddleOCR language '%s' to limit model memory.",
+                        evicted_language,
+                    )
+            else:
+                cls._instances.move_to_end(normalized_language)
+
+            # Keep the legacy attribute as an alias for diagnostics and older code.
+            cls._instance = instance
+            return instance
+
+    @classmethod
+    def get_loaded_languages(cls) -> list[str]:
+        with cls._lock:
+            return list(cls._instances.keys())
 
     def process_image(self, image_bytes: bytes) -> list[dict]:
         """
@@ -189,7 +212,7 @@ class PaddleOCREngine:
         return detections
 
     @staticmethod
-    def _build_constructor_kwargs() -> dict:
+    def _build_constructor_kwargs(language: str = "japan") -> dict:
         """
         Build a PaddleOCR constructor kwargs dict that works across both
         PaddleOCR 2.x and 3.x.
@@ -206,7 +229,7 @@ class PaddleOCREngine:
         kwargs: dict = {}
 
         if "lang" in supported:
-            kwargs["lang"] = "japan"
+            kwargs["lang"] = language
 
         if "use_textline_orientation" in supported:
             kwargs["use_textline_orientation"] = True

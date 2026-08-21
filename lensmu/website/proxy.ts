@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { auth0, isAuth0Enabled } from "./lib/auth0";
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   if (!isAuth0Enabled || !auth0) {
     return NextResponse.next();
   }

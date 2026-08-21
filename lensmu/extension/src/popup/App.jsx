@@ -5,43 +5,12 @@ import TranslateSettings, {
 } from "./components/TranslateSettings.jsx";
 import LanguageSelector from "./components/LanguageSelector.jsx";
 import ReadAloudSettings from "./components/ReadAloudSettings.jsx";
+import {
+  DEFAULT_EXTENSION_SETTINGS,
+  mergeWithDefaults,
+} from "../../shared/preferences.js";
 
 const SETTINGS_KEY = "vt_settings";
-
-const DEFAULT_SETTINGS = {
-  ocrEngine: "tesseract",
-  translationProvider: "libre",
-  sourceLanguage: "auto",
-  targetLanguage: "en",
-  backendUrl: "http://localhost:8000",
-  googleCloudApiKey: "",
-  customOcrUrl: "",
-  customOcrApiKey: "",
-  openaiApiKey: "",
-  claudeApiKey: "",
-  geminiApiKey: "",
-  customApiKey: "",
-  customBaseUrl: "",
-  customModelName: "",
-  llmModel: "gemini-2.0-flash",
-  enableReadAloud: false,
-  elevenLabsApiKey: "",
-  elevenLabsVoiceId: "",
-  elevenLabsModelId: "eleven_flash_v2_5",
-  elevenLabsOutputFormat: "mp3_44100_128",
-  elevenLabsStability: 0.5,
-  elevenLabsSimilarityBoost: 0.75,
-  elevenLabsStyle: 0,
-  elevenLabsSpeed: 1,
-  darkMode: false,
-  showConfidenceBorders: true,
-  overlayFontFamily: "sans",
-  overlayMinFontSize: 10,
-  overlayTextAlign: "auto",
-  contextSharingEnabled: false,
-  prefetchTranslations: false,
-  translateOnClickOnly: true,
-};
 
 const TAB_ITEMS = [
   { id: "home", label: "Home" },
@@ -175,7 +144,7 @@ function ToggleRow({
 }
 
 export default function App() {
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState(DEFAULT_EXTENSION_SETTINGS);
   const [loaded, setLoaded] = useState(false);
   const [serverStatus, setServerStatus] = useState("checking");
   const [activeTabId, setActiveTabId] = useState(null);
@@ -212,10 +181,11 @@ export default function App() {
           return;
         }
 
-        setSettings({
-          ...DEFAULT_SETTINGS,
-          ...normalizeLoadedSettings(settingsResponse?.settings || {}),
-        });
+        setSettings(
+          mergeWithDefaults(
+            normalizeLoadedSettings(settingsResponse?.settings || {})
+          )
+        );
 
         if (currentTab?.id) {
           setActiveTabId(currentTab.id);
@@ -322,7 +292,8 @@ export default function App() {
           const selectedEngineAvailable =
             selectedServerEngine === "paddleocr"
               ? health?.paddle_ocr_available
-              : health?.manga_ocr_available;
+              : health?.manga_full_available ??
+                (health?.paddle_ocr_available && health?.manga_ocr_available);
 
           setServerStatus(selectedEngineAvailable ? "online" : "unavailable");
         }
@@ -377,7 +348,9 @@ export default function App() {
     ? "This tab does not allow extension scripts."
     : tabState.active
       ? "Active on this site. Turning it off will keep it disabled for this domain."
-      : "Disabled for this site. Turning it on will re-enable it for future visits.";
+      : settings.autoTranslate
+        ? "Disabled for this site. Turning it on will re-enable it for future visits."
+        : "Inactive on this page. Automatic activation is off, so you stay in control.";
 
   async function handleTogglePage() {
     if (!activeTabId) {
@@ -711,6 +684,29 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="range-field">
+                <div className="range-field-header">
+                  <label className="form-label" htmlFor="overlay-opacity">
+                    Overlay opacity
+                  </label>
+                  <span className="range-field-value">
+                    {Math.round(Number(settings.overlayOpacity) * 100)}%
+                  </span>
+                </div>
+                <input
+                  id="overlay-opacity"
+                  className="range-input"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={settings.overlayOpacity}
+                  onChange={(event) =>
+                    updateSetting("overlayOpacity", Number(event.target.value))
+                  }
+                />
+              </div>
+
               <div className="card-divider" />
 
               <ToggleRow
@@ -736,21 +732,6 @@ export default function App() {
                 }
               />
 
-              <div className="card-divider" />
-
-              <ToggleRow
-                label="Context Sharing"
-                description="Saved locally for future multi-bubble context handling. It does not affect translations yet."
-                checked={Boolean(settings.contextSharingEnabled)}
-                badge="Preview"
-                onToggle={() =>
-                  // TODO: Wire this into prompt construction once shared-context translation is supported.
-                  updateSetting(
-                    "contextSharingEnabled",
-                    !settings.contextSharingEnabled
-                  )
-                }
-              />
             </section>
           </>
         )}
@@ -870,7 +851,8 @@ export default function App() {
                   </div>
 
                   <p className="auth-note">
-                    Your account is linked and ready to save data.
+                    Your account is linked. Extension settings remain local in
+                    this build.
                   </p>
 
                   <button
@@ -895,7 +877,8 @@ export default function App() {
                         Protect and save your data!
                       </h2>
                       <p className="auth-promo-description">
-                        Sign in to sync your settings and unlock premium features across devices.
+                        Sign in for account features. Cross-device settings sync
+                        is not enabled in this build.
                       </p>
                     </div>
                   </div>
@@ -917,6 +900,82 @@ export default function App() {
                   </button>
                 </>
               )}
+            </section>
+
+            <section className="panel-card">
+              <div className="section-heading">
+                <div>
+                  <p className="section-kicker">Page Behavior</p>
+                  <h2 className="section-title">Discovery and performance</h2>
+                  <p className="section-description">
+                    Control when page tools appear and how much work runs at once.
+                  </p>
+                </div>
+              </div>
+
+              <ToggleRow
+                label="Activate automatically on allowed sites"
+                description="Shows per-image translation controls after a page loads. It never translates an image until you click or choose Translate This Page."
+                checked={Boolean(settings.autoTranslate)}
+                onToggle={() =>
+                  updateSetting("autoTranslate", !settings.autoTranslate)
+                }
+              />
+
+              <div className="card-divider" />
+
+              <div className="field-grid field-grid--triple">
+                <div className="form-group">
+                  <label className="form-label" htmlFor="min-image-width">
+                    Minimum width
+                  </label>
+                  <input
+                    id="min-image-width"
+                    className="form-input"
+                    type="number"
+                    min="32"
+                    max="4096"
+                    value={settings.minImageWidth}
+                    onChange={(event) =>
+                      updateSetting("minImageWidth", Number(event.target.value))
+                    }
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="min-image-height">
+                    Minimum height
+                  </label>
+                  <input
+                    id="min-image-height"
+                    className="form-input"
+                    type="number"
+                    min="32"
+                    max="4096"
+                    value={settings.minImageHeight}
+                    onChange={(event) =>
+                      updateSetting("minImageHeight", Number(event.target.value))
+                    }
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="max-concurrent-images">
+                    Parallel images
+                  </label>
+                  <input
+                    id="max-concurrent-images"
+                    className="form-input"
+                    type="number"
+                    min="1"
+                    max="12"
+                    value={settings.maxConcurrentImages}
+                    onChange={(event) =>
+                      updateSetting("maxConcurrentImages", Number(event.target.value))
+                    }
+                  />
+                </div>
+              </div>
             </section>
 
             <section className="panel-card">
@@ -995,8 +1054,8 @@ export default function App() {
               />
 
               <p className="section-note">
-                Settings are stored locally. Context Sharing is only a saved UI
-                placeholder for now.
+                Settings and provider credentials are stored locally in the
+                extension.
               </p>
             </section>
           </>

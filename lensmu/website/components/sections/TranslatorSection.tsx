@@ -4,7 +4,6 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import {
   Upload,
   FileImage,
-  FileText,
   Languages,
   Wand2,
   RefreshCcw,
@@ -17,7 +16,6 @@ import Image from "next/image";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { translateImage, type ProcessState, type OcrEngine } from "@/lib/translator";
@@ -32,6 +30,14 @@ const LANGUAGES = [
   { id: "de", name: "German" },
 ];
 
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const SUPPORTED_IMAGE_NAME = /\.(jpe?g|png|webp)$/i;
+
+function isSupportedImage(file: File) {
+  return ["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
+    (!file.type && SUPPORTED_IMAGE_NAME.test(file.name));
+}
+
 export function TranslatorSection() {
   const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -44,16 +50,6 @@ export function TranslatorSection() {
   const [sourceLang, setSourceLang] = useState("ja");
   const [targetLang, setTargetLang] = useState("en");
   const [ocrEngine, setOcrEngine] = useState<OcrEngine>("paddleocr");
-  const [provider, setProvider] = useState("libre");
-  const [apiKeys, setApiKeys] = useState({
-    openai: "",
-    claude: "",
-    gemini: "",
-    custom: ""
-  });
-  const [customBaseUrl, setCustomBaseUrl] = useState("");
-  const [customModelName, setCustomModelName] = useState("");
-
   // Result state
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [resultBlob, setResultBlob] = useState<Blob | null>(null);
@@ -61,12 +57,37 @@ export function TranslatorSection() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const handleFile = useCallback((uploadedFile: File) => {
+    if (!isSupportedImage(uploadedFile)) {
+      setErrorMessage("Choose a JPG, PNG, or WEBP image. PDF support is not available in this demo.");
+      return;
+    }
+
+    if (uploadedFile.size > MAX_IMAGE_BYTES) {
+      setErrorMessage("That image is larger than 10 MB. Choose a smaller file and try again.");
+      return;
+    }
+
+    setErrorMessage(null);
+    setFile(uploadedFile);
+    setPreviewUrl(URL.createObjectURL(uploadedFile));
+    setResultUrl(null);
+    setResultBlob(null);
+    setProcessState("idle");
+  }, []);
+
   // Release object URLs on unmount / reset to avoid leaks
   useEffect(() => {
     return () => {
       if (resultUrl) URL.revokeObjectURL(resultUrl);
     };
   }, [resultUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -86,7 +107,7 @@ export function TranslatorSection() {
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       handleFile(e.dataTransfer.files[0]);
     }
-  }, []);
+  }, [handleFile]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     e.preventDefault();
@@ -95,26 +116,7 @@ export function TranslatorSection() {
     }
   };
 
-  const handleFile = (uploadedFile: File) => {
-    // Check if it's an image or pdf
-    if (!uploadedFile.type.includes("image") && uploadedFile.type !== "application/pdf") {
-      alert("Please upload a valid image or PDF.");
-      return;
-    }
-    
-    setFile(uploadedFile);
-    if (uploadedFile.type.includes("image")) {
-      const url = URL.createObjectURL(uploadedFile);
-      setPreviewUrl(url);
-    } else {
-      setPreviewUrl(null); // PDF placeholder can be used later
-    }
-    setProcessState("idle");
-  };
-
   const clearFile = () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    if (resultUrl) URL.revokeObjectURL(resultUrl);
     setFile(null);
     setPreviewUrl(null);
     setResultUrl(null);
@@ -126,14 +128,6 @@ export function TranslatorSection() {
 
   const startTranslation = async () => {
     if (!file) return;
-
-    if (!file.type.includes("image")) {
-      setErrorMessage(
-        "PDF translation isn't wired up yet — please upload an image (JPG, PNG, WEBP)."
-      );
-      setProcessState("error");
-      return;
-    }
 
     setErrorMessage(null);
 
@@ -171,13 +165,13 @@ export function TranslatorSection() {
     <section className="bg-background section-padding min-h-screen pt-24 md:pt-32">
       <div className="section-shell">
         <div className="mx-auto max-w-3xl text-center mb-12">
-          <p className="eyebrow">Document Translator</p>
+          <p className="eyebrow">Image Translator Demo</p>
           <h1 className="mt-3 text-4xl font-bold leading-tight sm:text-5xl">
-            Translate files instantly.
+            Translate text inside an image.
           </h1>
           <p className="mt-5 text-lg text-muted-foreground max-w-2xl mx-auto">
-            Upload images, screenshots, mangas, or PDFs. Our OCR + AI pipeline 
-            detects text and redraws it in your chosen language, preserving the original layout.
+            Upload a screenshot, manga panel, or photo. This limited demo uses
+            your local OCR backend and MyMemory, then redraws the result in place.
           </p>
         </div>
 
@@ -198,7 +192,7 @@ export function TranslatorSection() {
                 ref={fileInputRef}
                 type="file"
                 className="hidden"
-                accept="image/*,application/pdf"
+                accept="image/jpeg,image/png,image/webp"
                 onChange={handleChange}
               />
               <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary/10 mb-6">
@@ -206,8 +200,13 @@ export function TranslatorSection() {
               </div>
               <h3 className="text-xl font-semibold mb-2">Drag & Drop your file here</h3>
               <p className="text-muted-foreground mb-8">
-                Supports JPG, PNG, WEBP, and PDF (up to 10MB)
+                Supports JPG, PNG, and WEBP up to 10 MB
               </p>
+              {errorMessage ? (
+                <p className="mb-6 max-w-md text-sm text-destructive" role="alert">
+                  {errorMessage}
+                </p>
+              ) : null}
               <Button size="lg" className="rounded-full px-8 shadow-sm" onClick={() => fileInputRef.current?.click()}>
                 Browse Files
               </Button>
@@ -218,8 +217,8 @@ export function TranslatorSection() {
               <div className="flex flex-col">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-semibold text-lg flex items-center gap-2">
-                    {file.type.includes("image") ? <FileImage className="h-5 w-5 text-primary" /> : <FileText className="h-5 w-5 text-primary" />}
-                    Original File
+                    <FileImage className="h-5 w-5 text-primary" />
+                    Original Image
                   </h3>
                   {processState === "idle" && (
                     <Button variant="ghost" size="sm" onClick={clearFile} className="h-8 text-muted-foreground hover:text-destructive">
@@ -236,13 +235,7 @@ export function TranslatorSection() {
                       fill 
                       className={cn("object-contain p-4", processState !== "idle" && processState !== "done" && "opacity-50")}
                     />
-                  ) : (
-                    <div className="text-center p-6">
-                      <FileText className="h-16 w-16 text-muted-foreground/50 mx-auto mb-4" />
-                      <p className="font-medium text-foreground">{file.name}</p>
-                      <p className="text-sm text-muted-foreground mt-1">{(file.size / 1024 / 1024).toFixed(2)} MB PDF Document</p>
-                    </div>
-                  )}
+                  ) : null}
                   
                   {/* Scanning Overlay Effect */}
                   {processState === "scanning" && (
@@ -322,7 +315,7 @@ export function TranslatorSection() {
                       <div className="pt-2 border-t border-border/50">
                         <Button size="lg" className="w-full rounded-full shadow-md h-12 text-base" onClick={startTranslation}>
                           <Wand2 className="mr-2 h-5 w-5" />
-                          Translate Document
+                          Translate Image
                         </Button>
                       </div>
                     </div>
@@ -407,16 +400,16 @@ export function TranslatorSection() {
                     </div>
                     
                     <h3 className="text-xl font-bold mb-2">
-                      {processState === "uploading" && "Uploading securely..."}
+                      {processState === "uploading" && "Preparing your image..."}
                       {processState === "scanning" && "Running OCR extraction..."}
                       {processState === "translating" && "Translating context..."}
-                      {processState === "rendering" && "Redrawing on document..."}
+                      {processState === "rendering" && "Redrawing on the image..."}
                     </h3>
                     
                     <p className="text-muted-foreground text-sm max-w-[250px]">
-                      {processState === "uploading" && "Transferring file to secure processing servers."}
-                      {processState === "scanning" && "VisionTranslate is detecting bounding boxes and text regions."}
-                      {processState === "translating" && "Applying AI models to generate accurate, natural translations."}
+                      {processState === "uploading" && "Reading image pixels in your browser."}
+                      {processState === "scanning" && "Your local OCR backend is detecting text regions."}
+                      {processState === "translating" && "Sending extracted text to the MyMemory translation service."}
                       {processState === "rendering" && "Stitching translated text back into the original visual layout."}
                     </p>
 

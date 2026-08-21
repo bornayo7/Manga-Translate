@@ -85,6 +85,20 @@ import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation 
  * }
  */
 const tabStates = new Map();
+const REQUEST_TIMEOUT_MS = 30000;
+const PADDLE_LANGUAGE_ALIASES = Object.freeze({
+  auto: 'japan',
+  ja: 'japan',
+  jp: 'japan',
+  zh: 'ch',
+  'zh-cn': 'ch',
+  'zh-tw': 'chinese_cht',
+  ko: 'korean',
+  de: 'de',
+  fr: 'fr',
+  en: 'en',
+  es: 'es'
+});
 
 /*
  * --------------------------------------------------------------------------
@@ -241,6 +255,22 @@ function normalizeCustomOcrResponse(body, fallbackSourceLang = 'auto') {
     fallbackSourceLang;
 
   return { blocks, source_lang };
+}
+
+function normalizePaddleLanguage(language) {
+  const normalized = String(language || 'auto').trim().toLowerCase();
+  return PADDLE_LANGUAGE_ALIASES[normalized] || normalized || 'japan';
+}
+
+function showFatalErrorNotification(errorMessage) {
+  const notificationId = `vt-error-${Date.now()}`;
+  return chrome.notifications.create(notificationId, {
+    type: 'basic',
+    iconUrl: 'icons/VT_KD_128.png',
+    title: 'VisionTranslate Error',
+    message: errorMessage || 'An unexpected fatal error occurred.',
+    priority: 2
+  });
 }
 
 const OFFSCREEN_TESSERACT_DOCUMENT_PATH = 'offscreen/ocr.html';
@@ -458,8 +488,21 @@ async function sendToContentScript(tabId, message) {
  * This is a very common pattern in browser extensions.
  */
 async function proxyFetch(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const upstreamSignal = options.signal;
+  const abortFromUpstream = () => controller.abort();
+
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort();
+    } else {
+      upstreamSignal.addEventListener('abort', abortFromUpstream, { once: true });
+    }
+  }
+
   try {
-    const response = await fetch(url, options);
+    const response = await fetch(url, { ...options, signal: controller.signal });
 
     /*
      * We need to serialize the response to send it back via message
@@ -491,10 +534,18 @@ async function proxyFetch(url, options = {}) {
     return {
       ok: false,
       status: 0,
-      statusText: 'Network Error',
+      statusText: error?.name === 'AbortError' ? 'Request Timeout' : 'Network Error',
       headers: {},
-      body: { error: error.message }
+      body: {
+        error:
+          error?.name === 'AbortError'
+            ? `Request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds.`
+            : error.message
+      }
     };
+  } finally {
+    clearTimeout(timeoutId);
+    upstreamSignal?.removeEventListener?.('abort', abortFromUpstream);
   }
 }
 
@@ -619,11 +670,15 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab?.url) {
     const hostname = getHostname(tab.url);
     if (hostname) {
+      const settings = await getSettings();
+      if (!settings.autoTranslate) {
+        return;
+      }
+
       const disabledDomains = await getDisabledDomains();
       if (!disabledDomains.includes(hostname)) {
         const state = getTabState(tabId);
         if (!state.active) {
-          const settings = await getSettings();
           const response = await sendToContentScript(tabId, {
             action: 'ACTIVATE',
             payload: { settings }
@@ -753,7 +808,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const response = await proxyFetch(`${backendUrl}/ocr/paddle`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image: rawImage })
+              body: JSON.stringify({
+                image: rawImage,
+                lang: normalizePaddleLanguage(payload.sourceLang || settings.sourceLanguage)
+              })
             });
 
             if (!response.ok) {
@@ -780,7 +838,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const detectResponse = await proxyFetch(`${backendUrl}/ocr/paddle`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image: rawImage })
+              body: JSON.stringify({ image: rawImage, lang: 'japan' })
             });
 
             if (!detectResponse.ok) {
@@ -1236,7 +1294,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * We save them and notify all active content scripts.
        */
       case 'SAVE_SETTINGS': {
-        await saveSettings(payload.settings);
+        const savedSettings = await saveSettings(payload.settings);
 
         /*
          * Broadcast updated settings to all tabs that have translation
@@ -1247,11 +1305,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (state.active) {
             await sendToContentScript(activeTabId, {
               action: 'SETTINGS_UPDATED',
-              payload: { settings: payload.settings }
+              payload: { settings: savedSettings }
             });
           }
         }
 
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'FATAL_ERROR': {
+        await showFatalErrorNotification(payload.errorMessage);
         sendResponse({ success: true });
         break;
       }
@@ -1310,7 +1374,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ error: `Unknown action: ${action}` });
       }
     }
-  })();
+  })().catch((error) => {
+    console.error('[VisionTranslate] Unhandled message error:', error);
+    sendResponse({
+      success: false,
+      error: error?.message || 'Unexpected background worker error.'
+    });
+  });
 
   /*
    * CRITICAL: Return true to indicate we will call sendResponse
@@ -1402,26 +1472,3 @@ async function toggleTranslation(tabId) {
 
   console.log(`[VisionTranslate] Translation ${state.active ? 'activated' : 'deactivated'} on tab ${tabId}${hostname ? ` (${hostname})` : ''}`);
 }
-
-// background.js
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'FATAL_ERROR') {
-    
-    // Create a unique ID for the notification so multiple errors don't overwrite each other immediately
-    const notificationId = `vt-error-${Date.now()}`;
-    
-    chrome.notifications.create(notificationId, {
-      type: 'basic',
-      iconUrl: 'icons/VT_KD_128.png', // MUST be a valid path to an icon in your extension
-      title: 'VisionTranslate Error',
-      message: message.payload.errorMessage || 'An unexpected fatal error occurred.',
-      priority: 2, // 2 is the highest priority, keeps the notification on screen longer
-    });
-
-    sendResponse({ success: true });
-    return false; // Synchronous response
-  }
-  
-  // ... your other background listeners
-});

@@ -74,6 +74,7 @@ export async function saveSettings(settings) {
     await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
     await chrome.storage.local.remove(LEGACY_SETTING_KEYS);
     console.log('[VisionTranslate] Settings saved:', redactSecretsForLog(merged));
+    return merged;
   } catch (error) {
     console.error('[VisionTranslate] Error saving settings:', error);
     throw error;

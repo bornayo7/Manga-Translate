@@ -20,6 +20,17 @@ export type OcrBlock = {
   orientation?: "horizontal" | "vertical";
 };
 
+type BackendDetection = {
+  text: string;
+  bbox: number[];
+  confidence?: number;
+  orientation?: string;
+};
+
+type BackendOcrResponse = {
+  detections?: BackendDetection[];
+};
+
 export type TranslateOptions = {
   file: File;
   ocrEngine: OcrEngine;
@@ -40,6 +51,27 @@ export type TranslateResult = {
 
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 const MYMEMORY_CHAR_LIMIT = 500;
+const REQUEST_TIMEOUT_MS = 30000;
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = REQUEST_TIMEOUT_MS
+) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function previewText(text: string, maxLength = 120): string {
   const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -171,9 +203,7 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      // Keep the object URL alive until the image is drawn on the canvas.
-      // Consumers can revoke it later if they want, but we don't revoke here
-      // because the caller might want to reuse the HTMLImageElement.
+      URL.revokeObjectURL(url);
       resolve(img);
     };
     img.onerror = () => {
@@ -199,7 +229,7 @@ async function runOCR(
     sourceLang && sourceLang !== "auto" ? sourceLang : "japan";
 
   if (engine === "paddleocr") {
-    const data = await postJSON(`${backendUrl}/ocr/paddle`, {
+    const data = await postJSON<BackendOcrResponse>(`${backendUrl}/ocr/paddle`, {
       image: imageBase64,
       lang: paddleLang,
     });
@@ -209,7 +239,7 @@ async function runOCR(
   if (engine === "mangaocr") {
     // Two-step: Paddle for detection, MangaOCR for recognition. MangaOCR is
     // Japanese-only, so we force Japanese for the detection pass too.
-    const paddleData = await postJSON(`${backendUrl}/ocr/paddle`, {
+    const paddleData = await postJSON<BackendOcrResponse>(`${backendUrl}/ocr/paddle`, {
       image: imageBase64,
       lang: "japan",
     });
@@ -217,7 +247,7 @@ async function runOCR(
     if (detections.length === 0) return [];
 
     const bboxes = detections.map((d: { bbox: number[] }) => d.bbox);
-    const mangaData = await postJSON(`${backendUrl}/ocr/manga`, {
+    const mangaData = await postJSON<BackendOcrResponse>(`${backendUrl}/ocr/manga`, {
       image: imageBase64,
       bboxes,
     });
@@ -264,8 +294,8 @@ function normalizePaddleDetections(
     .filter((b) => b.text.length > 0);
 }
 
-async function postJSON(url: string, body: unknown): Promise<any> {
-  const response = await fetch(url, {
+async function postJSON<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -274,7 +304,8 @@ async function postJSON(url: string, body: unknown): Promise<any> {
     let detail = "";
     try {
       const data = await response.json();
-      detail = data?.detail || data?.message || JSON.stringify(data);
+      const rawDetail = data?.detail || data?.message || data;
+      detail = typeof rawDetail === "string" ? rawDetail : JSON.stringify(rawDetail);
     } catch {
       detail = await response.text().catch(() => "");
     }
@@ -283,7 +314,7 @@ async function postJSON(url: string, body: unknown): Promise<any> {
         `Make sure the backend is running at ${new URL(url).origin}.`
     );
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
 // -- Translation (MyMemory free API) --
@@ -379,7 +410,7 @@ async function translateOne(
     targetLang,
     sourcePreview: previewText(text),
   });
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://api.mymemory.translated.net/get?${params.toString()}`
   );
   if (!response.ok) {

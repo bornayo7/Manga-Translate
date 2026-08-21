@@ -1,6 +1,7 @@
 "use client";
 
 import { Github, Menu, Moon, Sun, X, ChevronRight, Chrome } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { AuthButtons } from "@/components/auth/AuthButtons";
@@ -18,8 +19,12 @@ export function Navbar() {
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     const shouldUseDark = savedTheme ? savedTheme === "dark" : prefersDark;
 
-    document.documentElement.classList.toggle("dark", shouldUseDark);
-    setDarkMode(shouldUseDark);
+    const frameId = window.requestAnimationFrame(() => {
+      document.documentElement.classList.toggle("dark", shouldUseDark);
+      setDarkMode(shouldUseDark);
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
   }, []);
 
   function toggleTheme() {
@@ -37,25 +42,25 @@ export function Navbar() {
       <nav className="section-shell flex h-16 items-center">
         {/* Left: Logo */}
         <div className="flex flex-1 items-center justify-start">
-          <a
+          <Link
             href="/"
             className="flex items-center gap-2 transition-transform hover:scale-[1.02]"
             aria-label="VisionTranslate home"
           >
             <BrandLogo />
-          </a>
+          </Link>
         </div>
 
         {/* Center: Navigation (Desktop) */}
         <div className="hidden md:flex items-center justify-center gap-1 rounded-full border border-border/40 bg-muted/20 px-2 py-1 backdrop-blur-md">
           {navLinks.map((link) => (
-            <a
+            <Link
               key={link.href}
               href={link.href}
               className="rounded-full px-4 py-1.5 text-sm font-medium text-muted-foreground transition-all hover:bg-muted hover:text-foreground"
             >
               {link.label}
-            </a>
+            </Link>
           ))}
         </div>
 
@@ -113,7 +118,7 @@ export function Navbar() {
       >
         <div className="section-shell flex flex-col gap-2">
           {navLinks.map((link) => (
-            <a
+            <Link
               key={link.href}
               href={link.href}
               className="flex items-center justify-between rounded-lg px-4 py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -121,7 +126,7 @@ export function Navbar() {
             >
               {link.label}
               <ChevronRight className="h-4 w-4 opacity-50" />
-            </a>
+            </Link>
           ))}
           <div className="mt-2 flex flex-col gap-2 border-t border-border/40 pt-4">
             <AuthButtons />
