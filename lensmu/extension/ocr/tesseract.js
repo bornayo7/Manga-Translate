@@ -76,6 +76,8 @@ import bundledTesseract from '../lib/tesseract.esm.min.js';
 // provides an API for OCR operations.
 // ---------------------------------------------------------------------------
 let worker = null;
+let workerInitPromise = null;
+let recognitionQueue = Promise.resolve();
 
 /**
  * Tracks which language the current worker is loaded with.
@@ -115,7 +117,15 @@ let currentLanguage = null;
  *
  * @throws {Error} If Tesseract.js fails to initialize or the image is invalid
  */
-export async function recognize(imageBase64, sourceLanguage = 'eng') {
+export function recognize(imageBase64, sourceLanguage = 'eng') {
+  const queuedRecognition = recognitionQueue.then(() =>
+    recognizeNow(imageBase64, sourceLanguage)
+  );
+  recognitionQueue = queuedRecognition.catch(() => undefined);
+  return queuedRecognition;
+}
+
+async function recognizeNow(imageBase64, sourceLanguage = 'eng') {
   const language = normalizeTesseractLanguage(sourceLanguage);
 
   // -------------------------------------------------------------------------
@@ -209,6 +219,23 @@ async function ensureWorkerReady(language) {
   if (worker && currentLanguage === language) {
     return;
   }
+
+  if (workerInitPromise) {
+    await workerInitPromise;
+    if (worker && currentLanguage === language) {
+      return;
+    }
+  }
+
+  workerInitPromise = initializeWorker(language);
+  try {
+    await workerInitPromise;
+  } finally {
+    workerInitPromise = null;
+  }
+}
+
+async function initializeWorker(language) {
 
   // If we have a worker but with a different language, terminate it and
   // start fresh. We could theoretically reinitialize with a new language,
@@ -424,6 +451,8 @@ function extractLinesFromResult(result) {
  * call it during cleanup.
  */
 export async function terminateWorker() {
+  await recognitionQueue.catch(() => undefined);
+  await workerInitPromise?.catch(() => undefined);
   if (worker) {
     console.info('[Tesseract] Terminating worker and freeing resources.');
     await worker.terminate();

@@ -59,6 +59,8 @@
  *
  * The prompt is designed to work well with both OpenAI and Claude models.
  */
+import { fetchWithTimeout } from '../shared/fetch-with-timeout.js';
+
 const MANGA_TRANSLATION_SYSTEM_PROMPT = `You are an expert manga/comic translator with deep knowledge of Japanese, Chinese, Korean, and other Asian languages. You translate text extracted from manga panels, comic speech bubbles, signs, and other image-based text.
 
 TRANSLATION GUIDELINES:
@@ -179,7 +181,7 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
  * @returns {Promise<string>}  — The model's response text
  */
 async function callOpenAI(userMessage, apiKey, model) {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+  const response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -250,7 +252,7 @@ async function callOpenAI(userMessage, apiKey, model) {
  * @returns {Promise<string>}  — The model's response text
  */
 async function callClaude(userMessage, apiKey, model) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -327,7 +329,7 @@ async function callGemini(userMessage, apiKey, model) {
    * We combine the system prompt and user message into the contents
    * array since Gemini handles system instructions via a separate field.
    */
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
     {
       method: 'POST',
@@ -394,7 +396,7 @@ async function callCustom(userMessage, apiKey, model, baseUrl) {
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers,
     body: JSON.stringify({

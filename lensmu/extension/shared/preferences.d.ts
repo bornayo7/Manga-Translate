@@ -2,6 +2,7 @@ export type ExtensionSettings = {
   targetLanguage: string;
   sourceLanguage: string;
   translationProvider: string;
+  allowThirdPartyFallback: boolean;
   backendUrl: string;
   googleCloudApiKey: string;
   customOcrUrl: string;
@@ -51,10 +52,22 @@ export type LocalOnlySettingKey =
   | 'elevenLabsApiKey';
 
 export type SyncedPreferences = Omit<ExtensionSettings, LocalOnlySettingKey>;
+export type SensitiveSettingKey =
+  | 'googleCloudApiKey'
+  | 'customOcrApiKey'
+  | 'openaiApiKey'
+  | 'claudeApiKey'
+  | 'geminiApiKey'
+  | 'customApiKey'
+  | 'elevenLabsApiKey';
+export type ContentScriptSettings = Omit<ExtensionSettings, SensitiveSettingKey> & {
+  configuredCredentials: Readonly<Record<SensitiveSettingKey, boolean>>;
+};
 
-export const PREFERENCE_SCHEMA_VERSION: 1;
+export const PREFERENCE_SCHEMA_VERSION: 2;
 export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings;
 export const LOCAL_ONLY_SETTING_KEYS: readonly LocalOnlySettingKey[];
+export const SENSITIVE_SETTING_KEYS: readonly SensitiveSettingKey[];
 export const SETTING_KEYS: readonly (keyof ExtensionSettings)[];
 export const SYNCED_PREFERENCE_KEYS: readonly (keyof SyncedPreferences)[];
 export const DEFAULT_SYNCED_PREFERENCES: Readonly<SyncedPreferences>;
@@ -73,3 +86,7 @@ export function splitSettingsForSync(
 export function pickSyncedPreferences(
   settings?: Partial<ExtensionSettings>
 ): SyncedPreferences;
+
+export function toContentScriptSettings(
+  settings?: Partial<ExtensionSettings>
+): ContentScriptSettings;

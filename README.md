@@ -32,7 +32,8 @@ VisionTranslate uses OCR (Optical Character Recognition) to extract text from im
 | **Extension** | JavaScript, React, Vite, Tesseract.js, Canvas |
 | **Backend** | Python, FastAPI, PaddleOCR, MangaOCR |
 | **OCR Engines** | PaddleOCR (80+ languages), MangaOCR (Japanese), Tesseract.js (in-browser), Google Cloud Vision |
-| **Translation** | Google Translate, Gemini, OpenAI, Claude, LibreTranslate |
+| **Translation** | Gemini, OpenAI, Claude, custom OpenAI-compatible APIs, MyMemory |
+| **Website** | Next.js 16, React 18, TypeScript, Auth0 |
 
 
 ## How It Works (Architecture)
@@ -83,7 +84,7 @@ VisionTranslate uses OCR (Optical Character Recognition) to extract text from im
 2. The background script tells the content script (injected in the page) to start scanning.
 3. The content script finds all `<img>` elements, extracts each image as a base64-encoded string, and sends it to the OCR engine.
 4. The OCR engine (PaddleOCR, MangaOCR, Tesseract.js, or Cloud Vision) returns bounding boxes + recognized text.
-5. The content script sends the recognized text to the translation module (Google Translate, Gemini, OpenAI, Claude, or LibreTranslate).
+5. The content script sends recognized text to the background worker, which calls Gemini, OpenAI, Claude, a custom API, or MyMemory. Provider credentials never enter the content script.
 6. The translation module returns the translated text.
 7. The content script renders translated text into a dedicated canvas layered over each image, keeping the overlay isolated from the host page's layout.
 
@@ -96,9 +97,9 @@ VisionTranslate uses OCR (Optical Character Recognition) to extract text from im
 |-------------------|-----------------|-----------------------|----------------------------------------|
 | Python            | 3.8+            | `python3 --version`   | https://www.python.org/downloads/      |
 | pip               | 21.0+           | `pip3 --version`      | Comes with Python                      |
-| Node.js           | 18.0+           | `node --version`      | https://nodejs.org/                    |
+| Node.js           | 20.19+          | `node --version`      | https://nodejs.org/                    |
 | npm               | 9.0+            | `npm --version`       | Comes with Node.js                     |
-| Chrome or Firefox | Latest          | Check browser version | https://www.google.com/chrome/         |
+| Chromium browser  | Chrome 109+     | Check browser version | https://www.google.com/chrome/         |
 | Git               | Any             | `git --version`       | https://git-scm.com/                   |
 
 **Operating system notes:**
@@ -165,7 +166,7 @@ pip install paddleocr>=2.7.0 manga-ocr>=0.1.8
 python server.py
 ```
 
-You should see: `INFO: Uvicorn running on http://0.0.0.0:8000`
+You should see: `INFO: Uvicorn running on http://127.0.0.1:8000`
 
 ### Step 5: Verify the server is running
 
@@ -191,7 +192,7 @@ docker build --build-arg INSTALL_OCR=true -t visiontranslate-backend .
 
 ```bash
 cd lensmu/extension
-npm install
+npm ci
 ```
 
 ### Step 2: Build the extension
@@ -210,12 +211,9 @@ npm run build
 4. Navigate to and select the `lensmu/extension/` folder (the one containing `manifest.json`)
 5. Pin VisionTranslate from the puzzle piece menu for easy access
 
-**Firefox:**
-
-1. Open Firefox and go to `about:debugging`
-2. Click **This Firefox** in the left sidebar
-3. Click **Load Temporary Add-on...**
-4. Navigate to `lensmu/extension/` and select `manifest.json`
+Firefox is not currently a supported release target. The active build relies on
+Chrome Manifest V3 offscreen documents; add a Firefox-specific manifest and
+browser test job before advertising Firefox support.
 
 
 ## How to Use
@@ -243,12 +241,13 @@ npm run build
 
 | Option                | Values                                     | Default       | Description                                                                 |
 |-----------------------|--------------------------------------------|---------------|-----------------------------------------------------------------------------|
-| OCR Engine            | PaddleOCR, MangaOCR, Tesseract.js, Cloud Vision | PaddleOCR | Which OCR engine to use for text extraction                                 |
-| Translation Provider  | Google Translate, Gemini, LibreTranslate   | Google        | Which translation service to use                                            |
+| OCR Engine            | PaddleOCR, MangaOCR, Tesseract.js, Cloud Vision | Tesseract.js | Which OCR engine to use for text extraction                              |
+| Translation Provider  | OpenAI, Claude, Gemini, custom API, MyMemory | MyMemory     | Which translation service to use                                         |
 | Target Language       | en, ja, zh, ko, es, fr, de, ... (ISO 639)  | en            | Language to translate INTO                                                  |
 | Source Language        | auto, en, ja, zh, ko, es, fr, de, ...      | auto          | Language to translate FROM (auto = auto-detect)                             |
 | Backend URL           | Any URL                                    | localhost:8000| Where the Python backend is running                                         |
-| Overlay Opacity       | 0.0 - 1.0                                 | 0.85          | How opaque the translation overlay is                                       |
+| Overlay Opacity       | 0.0 - 1.0                                 | 1.0           | How opaque the translation overlay is                                       |
+| Public fallback       | On / Off                                  | Off           | Whether a failed private/paid provider may retry through MyMemory             |
 | Font Size             | auto, 10-48                                | auto          | Font size for overlay text ("auto" scales to detected text region)          |
 
 
@@ -281,12 +280,12 @@ Hack-SMU-VII/
       Dockerfile                # Container build file
       .dockerignore             # Docker build exclusions
       ocr_engines/              # OCR engine wrappers
-        paddleocr_engine.py     # PaddleOCR wrapper
-        mangaocr_engine.py      # MangaOCR wrapper
+        paddle_ocr.py           # PaddleOCR wrapper
+        manga_ocr.py            # MangaOCR wrapper
       requirements.txt          # Core Python dependencies
       requirements-ocr.txt      # OCR engine dependencies
 
-    extension/                  # Browser extension (Chrome + Firefox)
+    extension/                  # Chromium browser extension
       manifest.json             # Extension manifest
       background.js             # Service worker (message routing, state)
       content.js                # Content script (finds images, injects overlay)
@@ -301,20 +300,18 @@ Hack-SMU-VII/
 
       shared/                   # Canonical extension preferences
 
-      ocr/                      # OCR engine clients
-        ocr-manager.js          # Engine router
-        backend-ocr.js          # PaddleOCR/MangaOCR client
-        tesseract.js            # In-browser OCR
-        cloud-vision.js         # Google Cloud Vision client
+      ocr/
+        tesseract.js            # In-browser OCR worker wrapper
 
       translate/                # Translation providers
         translate-manager.js    # Provider router
-        google-translate.js     # Google Translate client
         llm-translate.js        # OpenAI/Claude/Gemini client
-        libre-translate.js      # LibreTranslate client
+        libre-translate.js      # MyMemory client
 
       icons/                    # Extension icons
       dist/                     # Built files (generated by npm run build)
+
+    website/                    # Next.js marketing site and limited demo
 ```
 
 
@@ -326,7 +323,7 @@ When actively developing, use watch mode to auto-rebuild on changes:
 # Terminal 1: backend
 cd lensmu/backend
 source venv/bin/activate
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 # Terminal 2: extension build watcher
 cd lensmu/extension
@@ -342,12 +339,12 @@ After the watcher rebuilds, go to `chrome://extensions` and click the refresh ic
 
 - **Virtual environment not activated:** You should see `(venv)` in your terminal. If not, run `source venv/bin/activate` (macOS/Linux) or `.\venv\Scripts\Activate.ps1` (Windows).
 - **Dependencies not installed:** Run `pip install -r requirements.txt` again.
-- **Port 8000 in use:** Use a different port: `uvicorn server:app --host 0.0.0.0 --port 8001 --reload` and update the backend URL in the extension settings.
+- **Port 8000 in use:** Use a different port: `uvicorn server:app --host 127.0.0.1 --port 8001 --reload` and update the backend URL in the extension settings.
 - **PaddlePaddle import error:** PaddlePaddle requires Python 3.8–3.12. Use Tesseract.js as an alternative.
 
 ### Extension can't reach the backend
 
-- **Backend isn't running:** Check for `Uvicorn running on http://0.0.0.0:8000` in your terminal.
+- **Backend isn't running:** Check for `Uvicorn running on http://127.0.0.1:8000` in your terminal.
 - **Wrong backend URL:** The extension defaults to `http://localhost:8000`. Verify in the popup settings.
 - **CORS issue:** The backend includes CORS middleware for `chrome-extension://` and `moz-extension://` origins.
 

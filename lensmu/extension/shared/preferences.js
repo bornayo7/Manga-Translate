@@ -1,12 +1,13 @@
 // Canonical shared preference definitions used by both the extension and the website.
 // Keep this file free of secrets and free of browser-only or server-only APIs.
 
-export const PREFERENCE_SCHEMA_VERSION = 1;
+export const PREFERENCE_SCHEMA_VERSION = 2;
 
 export const DEFAULT_EXTENSION_SETTINGS = {
   targetLanguage: 'en',
   sourceLanguage: 'auto',
   translationProvider: 'libre',
+  allowThirdPartyFallback: false,
   backendUrl: 'http://localhost:8000',
   googleCloudApiKey: '',
   customOcrUrl: '',
@@ -56,6 +57,16 @@ export const LOCAL_ONLY_SETTING_KEYS = [
   'elevenLabsApiKey'
 ];
 
+export const SENSITIVE_SETTING_KEYS = Object.freeze([
+  'googleCloudApiKey',
+  'customOcrApiKey',
+  'openaiApiKey',
+  'claudeApiKey',
+  'geminiApiKey',
+  'customApiKey',
+  'elevenLabsApiKey'
+]);
+
 export const SETTING_KEYS = Object.freeze(Object.keys(DEFAULT_EXTENSION_SETTINGS));
 export const SYNCED_PREFERENCE_KEYS = Object.freeze(
   SETTING_KEYS.filter((key) => !LOCAL_ONLY_SETTING_KEYS.includes(key))
@@ -101,4 +112,19 @@ export function splitSettingsForSync(settings = {}) {
 
 export function pickSyncedPreferences(settings = {}) {
   return splitSettingsForSync(settings).synced;
+}
+
+export function toContentScriptSettings(settings = {}) {
+  const merged = mergeWithDefaults(settings);
+  const safeSettings = Object.fromEntries(
+    Object.entries(merged).filter(([key]) => !SENSITIVE_SETTING_KEYS.includes(key))
+  );
+
+  safeSettings.configuredCredentials = Object.freeze(
+    Object.fromEntries(
+      SENSITIVE_SETTING_KEYS.map((key) => [key, Boolean(merged[key])])
+    )
+  );
+
+  return safeSettings;
 }

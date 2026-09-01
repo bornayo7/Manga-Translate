@@ -57,8 +57,12 @@ export function ContactSection() {
       return;
     }
 
+    const subject = encodeURIComponent(`VisionTranslate inquiry from ${form.name.trim()}`);
+    const body = encodeURIComponent(
+      `Name: ${form.name.trim()}\nEmail: ${form.email.trim()}\n\n${form.message.trim()}`
+    );
+    window.location.href = `mailto:hello@visiontranslate.dev?subject=${subject}&body=${body}`;
     setSuccess(true);
-    setForm(initialForm);
   }
 
   function updateField(field: keyof FormState, value: string) {
@@ -156,7 +160,7 @@ export function ContactSection() {
 
                 <p className="min-h-6 text-sm font-medium text-primary" aria-live="polite">
                   {success
-                    ? "Thanks. Your message has been received by the VisionTranslate team."
+                    ? "Your email app should open with the message ready to send."
                     : ""}
                 </p>
               </form>

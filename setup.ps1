@@ -117,16 +117,11 @@ Write-Host "[5/6] Building the extension..." -ForegroundColor Yellow
 $extensionDir = Join-Path $PSScriptRoot "lensmu\extension"
 Push-Location $extensionDir
 
-Write-Host "  Running npm install..."
-npm install 2>&1 | Out-Null
+Write-Host "  Running npm ci..."
+npm ci 2>&1 | Out-Null
 
-Write-Host "  Building popup..."
-$env:BUILD_TARGET = "popup"
-npx vite build
-
-Write-Host "  Building overlay..."
-$env:BUILD_TARGET = "overlay"
-npx vite build
+Write-Host "  Building extension..."
+npm run build
 
 Pop-Location
 Write-Host "  Extension built." -ForegroundColor Green

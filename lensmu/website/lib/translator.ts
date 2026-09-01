@@ -2,6 +2,8 @@
 // Requires the FastAPI backend at DEFAULT_BACKEND_URL with CORS for localhost:3000.
 // All work happens in the browser; no Next.js API route is needed.
 
+import { chunkText } from "../../extension/shared/text-chunking.js";
+
 export type ProcessState =
   | "idle"
   | "uploading"
@@ -73,13 +75,6 @@ async function fetchWithTimeout(
   }
 }
 
-function previewText(text: string, maxLength = 120): string {
-  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
-  return normalized.length > maxLength
-    ? `${normalized.slice(0, maxLength)}...`
-    : normalized;
-}
-
 function normalizeForComparison(text: string): string {
   return String(text ?? "")
     .normalize("NFKC")
@@ -122,8 +117,7 @@ function ensureTranslatedText(
   if (isEffectivelyIdenticalTranslation(originalText, cleaned)) {
     console.warn("[VisionTranslate Website] Provider returned text identical to source", {
       provider: providerName,
-      sourcePreview: previewText(originalText),
-      translatedPreview: previewText(cleaned),
+      characterCount: String(originalText ?? "").length,
     });
   }
 
@@ -328,10 +322,7 @@ async function translateTexts(
     sourceLang,
     targetLang,
     textCount: texts.filter((text) => text.trim().length > 0).length,
-    texts: texts.map((text, index) => ({
-      index,
-      sourcePreview: previewText(text),
-    })),
+    characterCount: texts.reduce((total, text) => total + text.length, 0),
   });
 
   const out: string[] = [];
@@ -369,11 +360,7 @@ async function translateTexts(
     console.error("[VisionTranslate Website] Blocking render because every translation matches the source text", {
       sourceLang,
       targetLang,
-      translations: translatedEntries.map((entry) => ({
-        index: entry.index,
-        sourcePreview: previewText(entry.sourceText),
-        translationPreview: previewText(entry.translation),
-      })),
+      translationCount: translatedEntries.length,
     });
     throw new Error(
       "Translation failed: provider returned text identical to the source for every block."
@@ -392,7 +379,7 @@ async function translateOne(
   // boundaries. Manga bubbles are almost always under 500 chars so this
   // rarely fires, but include it to avoid silent truncation.
   if (text.length > MYMEMORY_CHAR_LIMIT) {
-    const chunks = text.match(/[^.!?。！？]+[.!?。！？]*/g) ?? [text];
+    const chunks = chunkText(text, MYMEMORY_CHAR_LIMIT);
     const translated: string[] = [];
     for (const chunk of chunks) {
       translated.push(await translateOne(chunk, sourceLang, targetLang));
@@ -408,7 +395,7 @@ async function translateOne(
     provider: "mymemory",
     sourceLang,
     targetLang,
-    sourcePreview: previewText(text),
+    characterCount: text.length,
   });
   const response = await fetchWithTimeout(
     `https://api.mymemory.translated.net/get?${params.toString()}`
@@ -417,12 +404,6 @@ async function translateOne(
     throw new Error(`MyMemory ${response.status} ${response.statusText}`);
   }
   const data = await response.json();
-  console.log("[VisionTranslate Website] MyMemory raw response", {
-    provider: "mymemory",
-    sourceLang,
-    targetLang,
-    rawResponse: data,
-  });
   if (data?.responseStatus && data.responseStatus !== 200) {
     throw new Error(
       `MyMemory error ${data.responseStatus}: ${data.responseDetails ?? "unknown"}`

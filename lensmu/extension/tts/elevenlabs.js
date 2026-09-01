@@ -1,17 +1,20 @@
+import { fetchWithTimeout } from "../shared/fetch-with-timeout.js";
+import { DEFAULT_EXTENSION_SETTINGS } from "../shared/preferences.js";
+
 const AUDIO_CACHE_STORAGE_KEY = "vt_elevenlabs_audio_cache";
 const AUDIO_INDEX_STORAGE_KEY = "vt_elevenlabs_audio_index";
 const MAX_CACHE_ENTRIES = 12;
-const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+const MAX_CACHE_BYTES = 5 * 1024 * 1024;
 
 const DEFAULT_ELEVENLABS_SETTINGS = {
-  elevenLabsApiKey: "",
-  elevenLabsVoiceId: "",
-  elevenLabsModelId: "eleven_flash_v2_5",
-  elevenLabsOutputFormat: "mp3_44100_128",
-  elevenLabsStability: 0.5,
-  elevenLabsSimilarityBoost: 0.75,
-  elevenLabsStyle: 0,
-  elevenLabsSpeed: 1,
+  elevenLabsApiKey: DEFAULT_EXTENSION_SETTINGS.elevenLabsApiKey,
+  elevenLabsVoiceId: DEFAULT_EXTENSION_SETTINGS.elevenLabsVoiceId,
+  elevenLabsModelId: DEFAULT_EXTENSION_SETTINGS.elevenLabsModelId,
+  elevenLabsOutputFormat: DEFAULT_EXTENSION_SETTINGS.elevenLabsOutputFormat,
+  elevenLabsStability: DEFAULT_EXTENSION_SETTINGS.elevenLabsStability,
+  elevenLabsSimilarityBoost: DEFAULT_EXTENSION_SETTINGS.elevenLabsSimilarityBoost,
+  elevenLabsStyle: DEFAULT_EXTENSION_SETTINGS.elevenLabsStyle,
+  elevenLabsSpeed: DEFAULT_EXTENSION_SETTINGS.elevenLabsSpeed,
 };
 
 function clampNumber(value, min, max, fallback) {
@@ -290,7 +293,7 @@ export async function loadElevenLabsVoices(rawSettings = {}) {
   const settings = normalizeElevenLabsSettings(rawSettings);
   ensureConfigured(settings, { requireVoiceId: false });
 
-  const response = await fetch("https://api.elevenlabs.io/v1/voices", {
+  const response = await fetchWithTimeout("https://api.elevenlabs.io/v1/voices", {
     method: "GET",
     headers: {
       "xi-api-key": settings.apiKey,
@@ -397,7 +400,7 @@ export async function generateReadAloudAudio({
     }
   }
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
       settings.voiceId
     )}?output_format=${encodeURIComponent(settings.outputFormat)}`,
@@ -406,7 +409,7 @@ export async function generateReadAloudAudio({
       headers: {
         "Content-Type": "application/json",
         "xi-api-key": settings.apiKey,
-        Accept: "audio/mpeg",
+        Accept: "*/*",
       },
       body: JSON.stringify({
         text: normalizedText,
