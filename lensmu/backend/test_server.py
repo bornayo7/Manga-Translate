@@ -215,6 +215,10 @@ class TestMangaOCRContract:
                 cls._instance = cls()
                 return cls._instance
 
+            @classmethod
+            def is_loaded(cls):
+                return cls._instance is not None
+
             def process_regions(self, image_bytes, bboxes):
                 assert image_bytes == TINY_PNG
                 type(self).requested_regions = bboxes

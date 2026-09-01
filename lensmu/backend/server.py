@@ -270,7 +270,7 @@ async def health_check() -> HealthResponse:
         paddle_ocr_available=PADDLE_AVAILABLE,
         paddle_ocr_loaded=bool(loaded_languages),
         manga_ocr_available=MANGA_AVAILABLE,
-        manga_ocr_loaded=MANGA_AVAILABLE and MangaOCREngine._instance is not None,
+        manga_ocr_loaded=MANGA_AVAILABLE and MangaOCREngine.is_loaded(),
         manga_full_available=PADDLE_AVAILABLE and MANGA_AVAILABLE,
         paddle_loaded_languages=loaded_languages,
     )
