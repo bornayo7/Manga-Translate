@@ -7,10 +7,9 @@ import LanguageSelector from "./components/LanguageSelector.jsx";
 import ReadAloudSettings from "./components/ReadAloudSettings.jsx";
 import {
   DEFAULT_EXTENSION_SETTINGS,
+  SETTINGS_STORAGE_KEY,
   mergeWithDefaults,
 } from "../../shared/preferences.js";
-
-const SETTINGS_KEY = "vt_settings";
 
 const TAB_ITEMS = [
   { id: "home", label: "Home" },
@@ -122,7 +121,9 @@ async function persistSettingsSnapshot(settings) {
     });
   } catch (error) {
     if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+      await chrome.storage.local.set({
+        [SETTINGS_STORAGE_KEY]: mergeWithDefaults(settings),
+      });
       return;
     }
 
@@ -260,15 +261,9 @@ export default function App() {
 
     const timeoutId = window.setTimeout(async () => {
       try {
-        await sendRuntimeMessage({
-          action: "SAVE_SETTINGS",
-          payload: { settings },
-        });
+        await persistSettingsSnapshot(settings);
       } catch (error) {
-        console.warn("[VisionTranslate] Falling back to local storage save:", error);
-        if (typeof chrome !== "undefined" && chrome.storage?.local) {
-          chrome.storage.local.set({ [SETTINGS_KEY]: settings });
-        }
+        console.warn("[VisionTranslate] Could not save settings:", error);
       }
     }, 180);
 
