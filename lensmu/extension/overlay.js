@@ -492,21 +492,6 @@ function scanContainerBoundary(ctx, box, referenceColor, direction, displayWidth
   };
 }
 
-function insetBox(box, inset) {
-  const safeInset = clamp(
-    inset,
-    0,
-    Math.max(0, Math.min(box.width / 2 - 1, box.height / 2 - 1))
-  );
-
-  return {
-    x: box.x + safeInset,
-    y: box.y + safeInset,
-    width: Math.max(1, box.width - safeInset * 2),
-    height: Math.max(1, box.height - safeInset * 2)
-  };
-}
-
 function insetBoxBySide(box, insets = {}) {
   const leftInset = Math.max(0, Number(insets.left) || 0);
   const rightInset = Math.max(0, Number(insets.right) || 0);
@@ -663,28 +648,6 @@ function getContrastColor(color) {
 
   /* 0.179 is the threshold where 4.5:1 contrast ratio is achieved with both black and white */
   return luminance > 0.179 ? 'black' : 'white';
-}
-
-/*
- * --------------------------------------------------------------------------
- * Confidence Border Color
- * --------------------------------------------------------------------------
- * Returns a color representing the OCR confidence level:
- *   - Green  (>= 0.8): High confidence — the OCR is very sure about the text
- *   - Yellow (>= 0.5): Medium confidence — might have errors
- *   - Red    (< 0.5):  Low confidence — likely incorrect, user should verify
- *
- * @param {number} confidence — Value between 0 and 1
- * @returns {string} — CSS color string
- */
-function getConfidenceBorderColor(confidence) {
-  if (confidence >= 0.8) {
-    return 'rgba(76, 175, 80, 0.7)';   /* Green — Material Design green */
-  } else if (confidence >= 0.5) {
-    return 'rgba(255, 193, 7, 0.7)';    /* Yellow/Amber */
-  } else {
-    return 'rgba(244, 67, 54, 0.7)';    /* Red */
-  }
 }
 
 const DEBUG_RENDER_LOGS = false;
@@ -1372,42 +1335,6 @@ function autoSizeFont(ctx, text, maxWidth, maxHeight, fontFamily, isVertical, mi
 
 /*
  * --------------------------------------------------------------------------
- * Helper: Truncate text with ellipsis to fit a given width
- * --------------------------------------------------------------------------
- * Removes characters from the end of the text and adds "..." until the
- * text fits within maxWidth.
- *
- * @param {CanvasRenderingContext2D} ctx — Canvas context with font already set
- * @param {string} text — Text to truncate
- * @param {number} maxWidth — Maximum width in pixels
- * @returns {string} — Truncated text with "..." appended
- */
-function truncateWithEllipsis(ctx, text, maxWidth) {
-  const ellipsis = '...';
-  const ellipsisWidth = ctx.measureText(ellipsis).width;
-
-  if (ctx.measureText(text).width <= maxWidth) {
-    return text;
-  }
-
-  /*
-   * Remove one character at a time from the end until the text
-   * plus ellipsis fits. This is O(n) in the worst case, but text
-   * strings from OCR are typically short.
-   */
-  let truncated = text;
-  while (truncated.length > 0) {
-    truncated = truncated.slice(0, -1);
-    if (ctx.measureText(truncated + ellipsis).width <= maxWidth) {
-      return truncated + ellipsis;
-    }
-  }
-
-  return ellipsis;
-}
-
-/*
- * --------------------------------------------------------------------------
  * Detect if Text Should Be Vertical
  * --------------------------------------------------------------------------
  * CJK (Chinese, Japanese, Korean) text is traditionally written vertically,
@@ -1755,23 +1682,4 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
   }
 
   console.log(`[VisionTranslate Overlay] Rendered ${ocrResults.length} merged text blocks`);
-}
-
-/*
- * ==========================================================================
- * EXPORT: restoreOriginal()
- * ==========================================================================
- * Restores the overlay canvas to show the original image (clears all
- * translated text). The original image underneath is always intact — we
- * just need to make the canvas transparent again.
- *
- * @param {HTMLCanvasElement} canvas — The overlay canvas
- */
-export function restoreOriginal(canvas) {
-  const ctx = canvas.getContext('2d');
-  const displayWidth = parseFloat(canvas.style.width);
-  const displayHeight = parseFloat(canvas.style.height);
-
-  /* Clear the entire canvas to fully transparent */
-  ctx.clearRect(0, 0, displayWidth, displayHeight);
 }
