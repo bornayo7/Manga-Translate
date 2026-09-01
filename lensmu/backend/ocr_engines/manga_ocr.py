@@ -95,6 +95,11 @@ class MangaOCREngine:
                     cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def is_loaded(cls) -> bool:
+        """Whether the model has been loaded, without triggering a load."""
+        return cls._instance is not None
+
     def process_image(self, image_bytes: bytes) -> str:
         """
         Recognize Japanese text from a single cropped image.
