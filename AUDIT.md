@@ -3,6 +3,84 @@
 Branch: `audit/deep-repair` (from `main` @ `48955f8` "Overhaul").
 Status legend for findings: **open** / **fixed** / **deferred** / **won't-fix**.
 
+## Review pass — 2026-09-01
+
+A second full read of the tree, running every build and test suite first.
+Baseline on entry: **`npm test` in `lensmu/extension` exited 1** — the previous
+pass left a hard syntax error in a shipped module, so CI on this branch was red
+and the extension could not translate anything at all.
+
+### Fixed in this pass
+
+| Severity | File | Finding |
+|---|---|---|
+| **blocker** | `extension/translate/libre-translate.js` | `translateWithMyMemory` was declared twice in one module scope (exported entry point + private batch helper), so the module failed to parse: `SyntaxError: Identifier 'translateWithMyMemory' has already been declared`. `translate-manager.js` imports it, so **every** translation path died at module load, not just MyMemory. The exported wrapper also called itself rather than the helper, so it would have recursed infinitely had it parsed. Private helper renamed to `translateEachText`. |
+| major | `extension/background.js` | With MangaOCR selected and PaddleOCR detecting no regions, background posted a synthetic box `[[0, 0, 1000000, 1000000]]` to `/ocr/manga`. The backend caps coordinates at `MAX_MANGA_COORDINATE` (100_000) and total area at `MAX_MANGA_TOTAL_REGION_PIXELS` (50_000_000), so that request was rejected 422 every time. Now returns an empty block list — MangaOCR recognizes crops and cannot detect regions, so there is nothing to send. |
+| major | `extension/content.js` | The MutationObserver flush read `mutationsList` from whichever callback armed the surviving debounce timer, so `invalidateImageState()` only ran for the **last** batch. On lazy-loading pages several `src` swaps land in one 500 ms window, leaving stale overlays pinned over changed images. Changed images now accumulate in a `Set` drained on flush. |
+| major | `backend/ocr_engines/paddle_ocr.py` | `_polygon_to_bbox` promised "the tightest axis-aligned rectangle that contains all 4 points" but built it with `int()`, which truncates toward zero and pulls the right/bottom edges *inside* the region. Those bboxes are reposted to `/ocr/manga` as crop rectangles, so this could shave the last glyph off a bubble before MangaOCR saw it. Now floors minimums and ceils maximums. (`_normalize_box` already rounded properly — that is how the two disagreed.) |
+| minor | `extension/src/popup/App.jsx` | The local-storage fallback save wrote raw React state, bypassing the `mergeWithDefaults` every other writer goes through. |
+| minor | `extension/utils/storage.js` | `migrateLegacySettings` only runs when `vt_settings` is absent, so legacy top-level keys sitting beside an existing `vt_settings` were never cleaned. `saveSettings` masked that with an unconditional `remove(LEGACY_SETTING_KEYS)` on every save, including the popup's per-keystroke debounced one. Cleanup moved to the read path, conditional. |
+| minor | `extension/auth/auth0.js` | The PKCE token exchange was the last bare `fetch()` in the extension; a stalled connection left `login()` awaiting forever with the popup stuck on "Signing in...". Now uses `fetchWithTimeout`. |
+| minor | `extension/translate/llm-translate.js` | `getLanguageName` had no `zh-CN` entry, but `LanguageSelector` emits `zh-CN` (never bare `zh`), so prompts read "translate ... to zh-CN". |
+| minor | `extension/manifest.json` | `host_permissions` listed `<all_urls>` plus 13 hosts it already subsumes — including three LibreTranslate instances the extension no longer contacts at all. A permission list that names services the code never calls misrepresents where user text goes. Collapsed to `<all_urls>`. |
+| minor | `backend/server.py`, `ocr_engines/manga_ocr.py` | `/health` read the private `MangaOCREngine._instance`. Added a public `is_loaded()`. |
+
+### Redundancy removed
+
+| Cluster | Was | Now |
+|---|---|---|
+| `normalizeForComparison`, `isEffectivelyIdenticalTranslation`, `stripDataUrlPrefix`, `toErrorMessage` | copies in `background.js`, `offscreen/ocr.js`, `translate-manager.js`, `libre-translate.js` | new `extension/shared/text.js` |
+| `clampNumber` | `tts/elevenlabs.js`, `popup/components/ReadAloudSettings.jsx` | `shared/preferences.js` (+ `.d.ts`) |
+| `'vt_settings'` literal | `utils/storage.js`, `popup/App.jsx` | `SETTINGS_STORAGE_KEY` in `shared/preferences.js` |
+| dead functions | `overlay.js`: `insetBox`, `getConfidenceBorderColor`, `truncateWithEllipsis`, `restoreOriginal`. `content.js`: `createToolbar`, `updateToolbarStatus`, `toggleAllOverlays`, `toolbarContainer`, no-op `showIcon`/`hideIcon` + their `removeEventListener` calls, `TRANSLATE_PAGE` alias. `background.js`: `getMessageSettings`, a shadowed `rawImage`. `ocr/tesseract.js`: the `globalThis.Tesseract` branch. `auth/auth0.js`: `isAuthenticated()`. `paddle_ocr.py`: write-only `_instance`. | deleted |
+| dead website files | `.eslintrc.json` (legacy format, ignored by ESLint 9 flat config), `FeaturesSection.tsx`, `githubLinks`/`linkedinLinks`, duplicated `@/lib/auth0` import in `layout.tsx` | deleted |
+| dead CSS | 66 lines of `.choice-card` radio-picker rules replaced by `RichSelect`; popup CSS 20.24 kB to 19.28 kB | deleted |
+| `ocr_engines/__init__.py` | `__all__` named two symbols the package deliberately does not import, so `import *` raised `AttributeError` | replaced with a pointer to the real module paths |
+
+### Verified after every change
+
+`extension`: `npm test` 16/16, `npm run build` clean.
+`backend`: `pytest test_server.py` 29 passed.
+`website`: `eslint .` clean, `tsc --noEmit` clean, `next build` clean.
+
+### Deliberately not changed
+
+Two duplicate helper copies stay: `content.js` is registered as a **classic**
+content script and cannot use static imports, and `ocr/tesseract.js` is
+dynamically imported by it on the non-Chrome OCR path. Sharing would mean
+routing one-liners through `import()` and widening `web_accessible_resources`
+— a net loss for five lines each.
+
+### Still open
+
+Behavioural or product decisions, not deterministic defects:
+
+- **Firefox (M3)** — the manifest declares only `background.service_worker`;
+  Firefox MV3 wants `background.scripts`. Unverified: no Firefox available here.
+- **Docker (M9)** — `Dockerfile` installs `libgl1-mesa-glx`, removed in Debian
+  12, which is what `python:3.11-slim` is based on. Unverified: no Docker here.
+- **Offscreen lifetime (m19)** — the offscreen document and its Tesseract worker
+  are created once and never closed. `terminateWorker()` exists and is correct
+  but nothing calls it; wiring idle teardown is a lifecycle design change, not a
+  cleanup, so it is left for a deliberate pass.
+- **Tesseract `auto` (m32)** — maps to `eng+jpn` only, so "auto" users reading
+  Korean or Chinese get nothing. Widening it loads four models per recognition;
+  that is a real speed/coverage trade-off to decide, not a bug to patch.
+- **LLM `max_tokens: 2000` (m22)** — caps a response at roughly 30 blocks.
+- **MyMemory has no fallback (M2)** — 5,000 chars/day anonymous, and the dead
+  LibreTranslate instances are now gone from the manifest too. The free tier is
+  MyMemory-or-nothing by design; that needs a product answer.
+- **Preference sync (M8)** — `website/app/api/preferences` is still callable and
+  still has no caller. The extension requests no `audience`, so its token could
+  not pass `api-auth.ts` anyway.
+- **`website/lib/translator.ts` (M29)** — still a second renderer alongside
+  `overlay.js`; deferred as a "limited demo" per PIPELINES.md.
+- **English stop-word list (m21)** — still overfit to one test passage
+  (`climbed`, `eastward`, `steep`, `sky`, `sun`, `watch`, ...).
+- **Root `.env.example`** — documents four variables no code reads.
+
+---
+
 ## Remediation update — 2026-08-31
 
 The deterministic security and reliability findings from this audit and the
