@@ -21,6 +21,8 @@
  * ==========================================================================
  */
 
+import { fetchWithTimeout } from '../shared/fetch-with-timeout.js';
+
 const AUTH0_DOMAIN = 'dev-f061rrmnizussvbh.us.auth0.com';
 const AUTH0_CLIENT_ID = 'Yix3qNxNUFUvEjx31LHFtZMhJRdtHt9S';
 const REDIRECT_URL = chrome.identity.getRedirectURL();
@@ -137,7 +139,7 @@ export async function login() {
   }
 
   /* Exchange code for tokens — no client_secret (public SPA + PKCE) */
-  const tokenResponse = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+  const tokenResponse = await fetchWithTimeout(`https://${AUTH0_DOMAIN}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -227,9 +229,4 @@ export async function getAuthState() {
   }
 
   return { isAuthenticated: true, user: auth.user };
-}
-
-export async function isAuthenticated() {
-  const state = await getAuthState();
-  return state.isAuthenticated;
 }
