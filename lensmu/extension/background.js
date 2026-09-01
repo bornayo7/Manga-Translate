@@ -123,10 +123,6 @@ function getTabState(tabId) {
   return tabStates.get(tabId);
 }
 
-async function getMessageSettings() {
-  return getSettings();
-}
-
 /*
  * --------------------------------------------------------------------------
  * OCR Helpers
@@ -709,7 +705,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * We route it to the configured OCR engine.
        */
       case 'OCR_REQUEST': {
-        const settings = await getMessageSettings();
+        const settings = await getSettings();
         const engine = normalizeOcrEngine(settings.ocrEngine);
         const backendUrl = settings.backendUrl || 'http://localhost:8000';
         const rawImage = stripDataUrlPrefix(payload.imageBase64);
@@ -765,8 +761,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
 
             const paddleDetections = detectResponse.body.detections || [];
-            const bboxes = paddleDetections.map(d => d.bbox);
-            const mangaBboxes = bboxes.length > 0 ? bboxes : [[0, 0, 1000000, 1000000]];
+            const mangaBboxes = paddleDetections.map(d => d.bbox);
+
+            /*
+             * MangaOCR recognizes crops; it cannot detect regions on its own.
+             * With no boxes from PaddleOCR there is nothing to recognize, so
+             * return an empty result instead of inventing a whole-page box.
+             * (A synthetic full-page box is also rejected outright by the
+             * backend, which caps coordinates and total region area.)
+             */
+            if (mangaBboxes.length === 0) {
+              sendResponse({ ok: true, body: { blocks: [], source_lang: 'ja' } });
+              break;
+            }
 
             const mangaResponse = await proxyFetch(`${backendUrl}/ocr/manga`, {
               method: 'POST',
@@ -872,7 +879,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               break;
             }
 
-            const rawImage = stripDataUrlPrefix(payload.imageBase64);
             const headers = {
               'Content-Type': 'application/json'
             };
@@ -949,7 +955,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
          * does NOT go through the Python backend — the APIs are called
          * directly from the extension's service worker context.
          */
-        const settings = await getMessageSettings();
+        const settings = await getSettings();
         const sourceLang = payload.sourceLang || 'auto';
         const targetLang = payload.targetLang || settings.targetLanguage || 'en';
 
@@ -1010,7 +1016,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * This stays separate from OCR and translation and uses the stored API key.
        */
       case 'LOAD_ELEVENLABS_VOICES': {
-        const settings = await getMessageSettings();
+        const settings = await getSettings();
 
         try {
           const voices = await loadElevenLabsVoices(settings);
@@ -1035,7 +1041,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * returned, but the network request stays in the background worker.
        */
       case 'TEST_ELEVENLABS_VOICE': {
-        const settings = await getMessageSettings();
+        const settings = await getSettings();
 
         try {
           const audioResult = await generateReadAloudAudio({
@@ -1091,7 +1097,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * the audio by text, image fingerprint, language, and voice settings.
        */
       case 'GENERATE_READ_ALOUD_AUDIO': {
-        const settings = await getMessageSettings();
+        const settings = await getSettings();
 
         try {
           const audioResult = await generateReadAloudAudio({
