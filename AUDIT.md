@@ -3,6 +3,22 @@
 Branch: `audit/deep-repair` (from `main` @ `48955f8` "Overhaul").
 Status legend for findings: **open** / **fixed** / **deferred** / **won't-fix**.
 
+## Remediation update — 2026-08-31
+
+The deterministic security and reliability findings from this audit and the
+follow-up repository audit have been repaired. Highlights: content scripts no
+longer receive credentials; sensitive payload logging is removed; provider
+fallback is opt-in; external requests time out; Tesseract work is serialized;
+host styles are restored; image and MangaOCR workloads are bounded; long text
+uses one tested chunker; dead OCR routing was removed; localhost is the backend
+default; setup scripts and documentation match the live architecture; and CI
+now validates all three applications.
+
+Still intentionally deferred because they require deployment configuration or
+a product choice: Auth0 preference-sync wiring, Firefox packaging/testing, real
+OCR-model/provider smoke tests, and a broader redesign that avoids wrapping
+host-page images merely to display per-image controls.
+
 ---
 
 ## Phase 0 — Baseline (recorded before any edits)

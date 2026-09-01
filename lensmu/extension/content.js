@@ -188,7 +188,30 @@ let toolbarContainer = null;
  * remove them on deactivate.
  */
 const translateIcons = new Set();
+const mutatedElementStyles = new Map();
 let activeReadAloudSession = null;
+
+function rememberOriginalInlineStyle(element) {
+  if (!element || mutatedElementStyles.has(element)) {
+    return;
+  }
+
+  mutatedElementStyles.set(element, element.getAttribute('style'));
+}
+
+function restoreOriginalInlineStyles() {
+  for (const [element, styleAttribute] of mutatedElementStyles) {
+    if (!element?.isConnected) {
+      continue;
+    }
+    if (styleAttribute === null) {
+      element.removeAttribute('style');
+    } else {
+      element.setAttribute('style', styleAttribute);
+    }
+  }
+  mutatedElementStyles.clear();
+}
 
 const READ_ALOUD_BUTTON_STATES = {
   stopped: {
@@ -323,13 +346,6 @@ function getTranslateControl(imageElement) {
   }
 
   return null;
-}
-
-function previewText(text, maxLength = 120) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-  return normalized.length > maxLength
-    ? `${normalized.slice(0, maxLength)}...`
-    : normalized;
 }
 
 function normalizeForComparison(text) {
@@ -909,19 +925,21 @@ function getImageSourceKey(imageInfo) {
 }
 
 function getTranslationSettingsSignature(settings = currentSettings) {
+  const configuredCredentials = settings?.configuredCredentials || {};
   return JSON.stringify({
     ocrEngine: settings?.ocrEngine || 'tesseract',
     translationProvider: settings?.translationProvider || 'libre',
+    allowThirdPartyFallback: settings?.allowThirdPartyFallback === true,
     sourceLanguage: settings?.sourceLanguage || 'auto',
     targetLanguage: settings?.targetLanguage || 'en',
     backendUrl: settings?.backendUrl || '',
-    googleCloudApiKey: Boolean(settings?.googleCloudApiKey),
+    googleCloudApiKey: Boolean(configuredCredentials.googleCloudApiKey),
     customOcrUrl: settings?.customOcrUrl || '',
-    customOcrApiKey: Boolean(settings?.customOcrApiKey),
-    openaiApiKey: Boolean(settings?.openaiApiKey),
-    claudeApiKey: Boolean(settings?.claudeApiKey),
-    geminiApiKey: Boolean(settings?.geminiApiKey),
-    customApiKey: Boolean(settings?.customApiKey),
+    customOcrApiKey: Boolean(configuredCredentials.customOcrApiKey),
+    openaiApiKey: Boolean(configuredCredentials.openaiApiKey),
+    claudeApiKey: Boolean(configuredCredentials.claudeApiKey),
+    geminiApiKey: Boolean(configuredCredentials.geminiApiKey),
+    customApiKey: Boolean(configuredCredentials.customApiKey),
     customBaseUrl: settings?.customBaseUrl || '',
     customModelName: settings?.customModelName || '',
     llmModel: settings?.llmModel || ''
@@ -1270,6 +1288,7 @@ function scanForImages() {
  */
 function createOverlay(imageElement) {
   removeOverlayForElement(imageElement);
+  rememberOriginalInlineStyle(imageElement);
 
   /*
    * Get the image's displayed dimensions. These might differ from the
@@ -1603,8 +1622,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       action: 'OCR_REQUEST',
       payload: {
         imageBase64,
-        sourceLang: settingsSnapshot.sourceLanguage || 'auto',
-        settings: settingsSnapshot
+        sourceLang: settingsSnapshot.sourceLanguage || 'auto'
       }
     });
 
@@ -1654,11 +1672,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
     const ocrSourceLanguage = ocrResponse.body?.source_lang || settingsSnapshot.sourceLanguage || 'auto';
     console.log('[VisionTranslate Content] OCR text detected', {
       sourceLang: ocrSourceLanguage,
-      blocks: rawOcrResults.map((block, index) => ({
-        index,
-        text: previewText(block.text),
-        bbox: block.bbox
-      }))
+      blockCount: rawOcrResults.length
     });
 
     if (bailIfJobStopped('overlay-module-load-cancelled') === null) {
@@ -1688,10 +1702,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       sourceLang: ocrSourceLanguage,
       targetLang: requestedTargetLanguage,
       textCount: textsToTranslate.length,
-      texts: textsToTranslate.map((text, index) => ({
-        index,
-        sourcePreview: previewText(text)
-      }))
+      characterCount: textsToTranslate.reduce((total, text) => total + text.length, 0)
     });
 
     if (bailIfJobStopped('translation-request-cancelled') === null) {
@@ -1703,8 +1714,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       payload: {
         texts: textsToTranslate,
         sourceLang: ocrSourceLanguage,
-        targetLang: requestedTargetLanguage,
-        settings: settingsSnapshot
+        targetLang: requestedTargetLanguage
       }
     });
 
@@ -1720,10 +1730,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       providerUsed: translateResponse?.body?.provider || null,
       fallbackUsed: Boolean(translateResponse?.body?.fallback_used),
       diagnostics: translateResponse?.body?.diagnostics || null,
-      translations: (translateResponse?.body?.translations || []).map((text, index) => ({
-        index,
-        text: previewText(text)
-      })),
+      translationCount: translateResponse?.body?.translations?.length || 0,
       error: translateResponse?.body?.error || null
     });
 
@@ -1794,12 +1801,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
         providerRequested: settingsSnapshot.translationProvider || 'libre',
         providerUsed: translateResponse.body?.provider || null,
         fallbackUsed: Boolean(translateResponse.body?.fallback_used),
-        diagnostics: translateResponse.body?.diagnostics || null,
-        translations: translationEntries.map((entry) => ({
-          index: entry.index,
-          sourcePreview: previewText(entry.sourceText),
-          translationPreview: previewText(entry.translation)
-        }))
+        diagnostics: translateResponse.body?.diagnostics || null
       });
       if (!isPrefetch) {
         showTranslationFailureNotice(element, 'Translation failed: output matched the source text.');
@@ -1814,12 +1816,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       providerUsed: translateResponse.body?.provider || null,
       fallbackUsed: Boolean(translateResponse.body?.fallback_used),
       diagnostics: translateResponse.body?.diagnostics || null,
-      texts: translationEntries.map((entry) => ({
-        index: entry.index,
-        sourcePreview: previewText(entry.sourceText),
-        translationPreview: previewText(entry.translation),
-        identicalToSource: entry.identical
-      }))
+      textCount: translationEntries.length
     });
 
     const speechText = overlayModule.buildSpeechText(mergedOcrResults, translations);
@@ -2165,6 +2162,7 @@ function addTranslateIcons() {
         iconAnchor = wrapper;
       } else {
         /* For other elements (background, canvas), set position on the element itself */
+        rememberOriginalInlineStyle(element);
         element.style.position = 'relative';
         iconAnchor = element;
       }
@@ -2510,6 +2508,10 @@ function setupMutationObserver() {
           ) ||
           (
             mutation.attributeName === 'style' &&
+            (
+              mutation.target.style?.backgroundImage ||
+              /background-image\s*:/i.test(mutation.oldValue || '')
+            ) &&
             !mutation.target.classList?.contains(`${CLASS_PREFIX}-wrapper`) &&
             !mutation.target.classList?.contains(`${CLASS_PREFIX}-icon-wrapper`) &&
             !mutation.target.classList?.contains(`${CLASS_PREFIX}-canvas`)
@@ -2567,7 +2569,8 @@ function setupMutationObserver() {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['src', 'srcset', 'style']
+    attributeFilter: ['src', 'srcset', 'style'],
+    attributeOldValue: true
   });
 
   console.log('[VisionTranslate] MutationObserver active — watching for new images');
@@ -2689,6 +2692,8 @@ function cleanupAll() {
     wrapper.remove();
   }
 
+  restoreOriginalInlineStyles();
+
   /* Remove the toolbar */
   if (toolbarContainer) {
     toolbarContainer.remove();
@@ -2730,7 +2735,12 @@ async function activate(settings) {
   isActive = true;
   currentSettings = settings || {};
 
-  console.log('[VisionTranslate] Activating with settings:', currentSettings);
+  console.log('[VisionTranslate] Activating', {
+    ocrEngine: currentSettings.ocrEngine || 'tesseract',
+    translationProvider: currentSettings.translationProvider || 'libre',
+    sourceLanguage: currentSettings.sourceLanguage || 'auto',
+    targetLanguage: currentSettings.targetLanguage || 'en'
+  });
 
   /* Create the floating toolbar */
   createToolbar();
@@ -2821,8 +2831,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case 'TRANSLATE_ALL_IMAGES': {
-      const settings = payload?.settings || message.settings || currentSettings;
-      translateCurrentPage(settings)
+      translateCurrentPage(currentSettings)
         .then(() => {
           updateToolbarStatus('Translation complete');
           sendResponse({ success: true });

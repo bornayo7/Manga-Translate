@@ -9,7 +9,23 @@
  */
 
 import { translateWithLLM } from './llm-translate.js';
-import { translateWithLibre } from './libre-translate.js';
+import { translateWithMyMemory } from './libre-translate.js';
+
+const PROVIDER_MODEL_RULES = Object.freeze({
+  openai: { prefix: 'gpt-', fallback: 'gpt-4o-mini' },
+  claude: { prefix: 'claude-', fallback: 'claude-sonnet-4-20250514' },
+  gemini: { prefix: 'gemini-', fallback: 'gemini-2.0-flash' }
+});
+
+export function resolveProviderModel(provider, configuredModel) {
+  const rule = PROVIDER_MODEL_RULES[provider];
+  if (!rule) {
+    return String(configuredModel || '').trim();
+  }
+
+  const model = String(configuredModel || '').trim();
+  return model.startsWith(rule.prefix) ? model : rule.fallback;
+}
 
 function normalizeForComparison(text) {
   return String(text || '')
@@ -21,13 +37,6 @@ function normalizeForComparison(text) {
 
 function isEffectivelyIdenticalTranslation(sourceText, translatedText) {
   return normalizeForComparison(sourceText) === normalizeForComparison(translatedText);
-}
-
-function previewText(text, maxLength = 120) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-  return normalized.length > maxLength
-    ? `${normalized.slice(0, maxLength)}...`
-    : normalized;
 }
 
 const LANGUAGE_ALIASES = {
@@ -86,9 +95,6 @@ const SCRIPT_LANGUAGE_RULES = {
     threshold: 0.2
   }
 };
-
-const NON_LATIN_SCRIPT_PATTERN =
-  /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff\u0900-\u097f\u0e00-\u0e7f]/;
 
 const LATIN_LANGUAGE_PROFILES = {
   en: {
@@ -386,18 +392,6 @@ export function shouldTranslateTextBlock(text, targetLanguage = 'en', sourceLang
     };
   }
 
-  const latinWords = getLatinWords(normalizedText);
-  if (
-    latinWords.length <= 2 &&
-    !NON_LATIN_SCRIPT_PATTERN.test(normalizedText)
-  ) {
-    return {
-      translate: false,
-      reason: 'short-ambiguous-text',
-      targetConfidence
-    };
-  }
-
   return {
     translate: true,
     reason: 'needs-translation',
@@ -439,8 +433,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       skippedEntries.push({
         index: i,
         reason: decision.reason,
-        targetConfidence: decision.targetConfidence,
-        sourcePreview: previewText(trimmed)
+        targetConfidence: decision.targetConfidence
       });
     }
   }
@@ -488,13 +481,9 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       index: entry.index,
       reason: entry.reason,
       targetConfidence: Number(entry.targetConfidence.toFixed(2)),
-      sourcePreview: entry.sourcePreview
+      characterCount: String(texts[entry.index] || '').length
     })),
-    texts: filteredTexts.map((text, index) => ({
-      index,
-      originalIndex: indexMap[index],
-      sourcePreview: previewText(text)
-    }))
+    characterCount: filteredTexts.reduce((total, text) => total + text.length, 0)
   });
 
   try {
@@ -512,7 +501,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           targetLang,
           apiKey,
           'openai',
-          settings.llmModel || 'gpt-4o-mini'
+          resolveProviderModel('openai', settings.llmModel)
         );
         break;
       }
@@ -530,7 +519,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           targetLang,
           apiKey,
           'claude',
-          settings.llmModel || 'claude-sonnet-4-20250514'
+          resolveProviderModel('claude', settings.llmModel)
         );
         break;
       }
@@ -548,7 +537,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           targetLang,
           apiKey,
           'gemini',
-          settings.llmModel || 'gemini-2.0-flash'
+          resolveProviderModel('gemini', settings.llmModel)
         );
         break;
       }
@@ -577,9 +566,9 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       case 'libre':
       default: {
         if (requestedProvider === 'google') {
-          console.warn('[VisionTranslate] Google Cloud Translation has been removed. Falling back to LibreTranslate.');
+          console.warn('[VisionTranslate] Google Cloud Translation has been removed. Using MyMemory.');
         }
-        result = await translateWithLibre(filteredTexts, sourceLang, targetLang);
+        result = await translateWithMyMemory(filteredTexts, sourceLang, targetLang);
         break;
       }
     }
@@ -587,10 +576,10 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`[VisionTranslate] Translation failed with provider "${provider}":`, error);
 
-    if (provider !== 'libre') {
-      console.warn('[VisionTranslate] Falling back to LibreTranslate...');
+    if (provider !== 'libre' && settings.allowThirdPartyFallback === true) {
+      console.warn('[VisionTranslate] User-enabled third-party fallback is being used.');
       try {
-        result = await translateWithLibre(filteredTexts, sourceLang, targetLang);
+        result = await translateWithMyMemory(filteredTexts, sourceLang, targetLang);
         result.fallback = true;
         result.originalError = errorMessage;
       } catch (fallbackError) {
@@ -635,12 +624,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       sourceLang: result.sourceLang || sourceLang,
       targetLang: result.targetLang || targetLang,
       identicalCount: identicalEntries.length,
-      identicalEntries: identicalEntries.map((entry) => ({
-        index: entry.index,
-        originalIndex: entry.originalIndex,
-        sourcePreview: previewText(entry.source),
-        translationPreview: previewText(entry.translation)
-      }))
+      identicalIndices: identicalEntries.map((entry) => entry.originalIndex)
     });
   }
 

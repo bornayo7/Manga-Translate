@@ -103,13 +103,40 @@ class TestMangaOCRValidation:
         assert response.status_code == 422
 
     def test_empty_bboxes(self):
-        """Request with empty bboxes list should return 400 or 501."""
+        """Request with empty bboxes list should fail schema validation."""
         response = client.post(
             "/ocr/manga",
             json={"image": "abc123", "bboxes": []}
         )
-        # 501 if MangaOCR not installed, 400 if installed but empty bboxes
-        assert response.status_code in [400, 501]
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "bbox",
+        [
+            [0, 0, 10],
+            [0, 0, 0, 10],
+            [0, 10, 10, 5],
+            [-1, 0, 10, 10],
+            [0, 0, 100_001, 10],
+            [0, 0, 10.5, 10],
+        ],
+    )
+    def test_invalid_bbox_geometry_is_rejected(self, bbox):
+        response = client.post(
+            "/ocr/manga",
+            json={"image": "abc123", "bboxes": [bbox]},
+        )
+        assert response.status_code == 422
+
+    def test_too_many_bboxes_are_rejected(self):
+        response = client.post(
+            "/ocr/manga",
+            json={
+                "image": "abc123",
+                "bboxes": [[0, 0, 1, 1]] * (server.MAX_MANGA_REGIONS + 1),
+            },
+        )
+        assert response.status_code == 422
 
 
 # ---------------------------------------------------------------------------

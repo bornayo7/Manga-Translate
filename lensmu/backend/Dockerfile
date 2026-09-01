@@ -18,6 +18,8 @@
 
 FROM python:3.11-slim
 
+ENV VISIONTRANSLATE_HOST=0.0.0.0
+
 # Build argument: set to "true" to install PaddleOCR and MangaOCR
 ARG INSTALL_OCR=false
 
@@ -25,7 +27,7 @@ WORKDIR /app
 
 # Install system dependencies needed by image processing libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 

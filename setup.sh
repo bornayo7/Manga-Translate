@@ -123,9 +123,8 @@ echo ""
 echo "[5/5] Building the extension..."
 
 cd "$EXTENSION_DIR"
-npm install --silent 2>/dev/null
-BUILD_TARGET=popup npx vite build 2>/dev/null
-BUILD_TARGET=overlay npx vite build 2>/dev/null
+npm ci --silent
+npm run build
 cd "$SCRIPT_DIR"
 
 echo "  Extension built."

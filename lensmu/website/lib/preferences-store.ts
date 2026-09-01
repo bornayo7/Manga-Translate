@@ -73,7 +73,25 @@ function normalizeStoredEnvelope(input: unknown): PreferenceStoreResult {
     updatedAt?: string;
     preferences?: unknown;
   };
-  const parsedPreferences = syncedPreferencesSchema.safeParse(rawEnvelope.preferences);
+  const rawPreferences =
+    rawEnvelope.preferences &&
+    typeof rawEnvelope.preferences === "object" &&
+    !Array.isArray(rawEnvelope.preferences)
+      ? rawEnvelope.preferences
+      : null;
+  const storedSchemaVersion = Number(rawEnvelope.schemaVersion || 1);
+
+  if (!rawPreferences || storedSchemaVersion > PREFERENCE_SCHEMA_VERSION) {
+    return {
+      hasStoredPreferences: false,
+      envelope: buildEmptyEnvelope(),
+    };
+  }
+
+  const parsedPreferences = syncedPreferencesSchema.safeParse({
+    ...getDefaultSyncedPreferences(),
+    ...rawPreferences,
+  });
 
   if (!parsedPreferences.success) {
     return {
@@ -82,15 +100,10 @@ function normalizeStoredEnvelope(input: unknown): PreferenceStoreResult {
     };
   }
 
-  const schemaVersion =
-    Number.isInteger(rawEnvelope.schemaVersion) && rawEnvelope.schemaVersion
-      ? rawEnvelope.schemaVersion
-      : PREFERENCE_SCHEMA_VERSION;
-
   return {
     hasStoredPreferences: true,
     envelope: {
-      schemaVersion,
+      schemaVersion: PREFERENCE_SCHEMA_VERSION,
       updatedAt:
         typeof rawEnvelope.updatedAt === "string" && rawEnvelope.updatedAt.trim()
           ? rawEnvelope.updatedAt

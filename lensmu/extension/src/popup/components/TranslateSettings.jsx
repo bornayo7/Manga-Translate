@@ -41,8 +41,8 @@ export const PROVIDER_OPTIONS = [
   },
   {
     id: "libre",
-    name: "LibreTranslate / MyMemory",
-    description: "Free fallback with no key required and simpler setup.",
+    name: "MyMemory",
+    description: "Free public translation with no key required and a limited daily quota.",
     needsApiKey: null,
     needsModel: false,
     badgeVariant: "provider",
@@ -88,6 +88,8 @@ export default function TranslateSettings({
   onCustomBaseUrlChange,
   customModelName,
   onCustomModelNameChange,
+  allowThirdPartyFallback,
+  onAllowThirdPartyFallbackChange,
 }) {
   const selectedProvider = PROVIDER_OPTIONS.find((option) => option.id === provider);
   const models = MODEL_OPTIONS[provider] || [];
@@ -223,7 +225,27 @@ export default function TranslateSettings({
         <div className="config-card fade-in">
           <p className="form-hint">
             No key is required here. Use this when you want quick setup or a
-            fallback provider without extra credentials.
+            public provider without extra credentials.
+          </p>
+        </div>
+      )}
+
+      {selectedProvider?.needsApiKey !== null && (
+        <div className="config-card fade-in">
+          <label className="form-label" htmlFor="allow-third-party-fallback">
+            <input
+              id="allow-third-party-fallback"
+              type="checkbox"
+              checked={Boolean(allowThirdPartyFallback)}
+              onChange={(event) =>
+                onAllowThirdPartyFallbackChange(event.target.checked)
+              }
+            />{" "}
+            Allow public-provider fallback
+          </label>
+          <p className="form-hint">
+            Off by default. When enabled, failed private or paid-provider
+            requests may be retried through MyMemory.
           </p>
         </div>
       )}

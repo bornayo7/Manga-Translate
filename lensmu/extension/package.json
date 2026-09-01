@@ -5,23 +5,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env BUILD_TARGET=popup vite build --watch",
-    "build": "npm run build:popup",
-    "build:popup": "cross-env BUILD_TARGET=popup vite build",
+    "dev": "vite build --watch",
+    "build": "vite build",
     "test": "node --test test/*.test.js",
-    "watch": "npm run watch:popup",
-    "watch:popup": "cross-env BUILD_TARGET=popup vite build --watch",
+    "watch": "vite build --watch",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "webextension-polyfill": "^0.12.0",
     "tesseract.js": "^5.1.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.2.0",
-    "cross-env": "^7.0.3",
     "vite": "^8.2.2"
   },
   "engines": {

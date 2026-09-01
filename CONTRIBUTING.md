@@ -11,7 +11,7 @@ Thanks for your interest in contributing to VisionTranslate! This guide covers e
    git clone https://github.com/YOUR-USERNAME/Hack-SMU-VII.git
    cd Hack-SMU-VII
    ```
-3. **Set up the backend and extension** by following the instructions in the [README](README.md).
+3. **Set up the backend, extension, and website** by following the instructions in the [README](README.md).
 4. **Create a branch** for your work:
    ```bash
    git checkout -b feature/your-feature-name
@@ -28,14 +28,21 @@ cd lensmu/backend
 python -m venv venv
 source venv/bin/activate          # Windows: .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 **Terminal 2 — Extension (Node.js):**
 ```bash
 cd lensmu/extension
-npm install
+npm ci
 npm run watch
+```
+
+**Terminal 3 — Website (Node.js):**
+```bash
+cd lensmu/website
+npm ci
+npm run dev
 ```
 
 After changes rebuild, refresh the extension in `chrome://extensions` by clicking the reload icon.
@@ -43,11 +50,13 @@ After changes rebuild, refresh the extension in `chrome://extensions` by clickin
 
 ## Project Structure
 
-The codebase is organized into two main parts.
+The codebase is organized into three main parts.
 
 **`lensmu/backend/`** contains the Python FastAPI server that runs OCR models locally. Key files include `server.py` (API routes), `security.py` (middleware), and the `ocr_engines/` directory (PaddleOCR and MangaOCR wrappers).
 
 **`lensmu/extension/`** contains the browser extension. The popup UI is built with React (`src/popup/`), OCR engine clients live in `ocr/`, and translation provider clients live in `translate/`. The `content.js` script handles page scanning and overlay rendering.
+
+**`lensmu/website/`** contains the Next.js marketing site, limited browser demo, and authenticated preferences API.
 
 
 ## Making Changes
@@ -56,7 +65,7 @@ The codebase is organized into two main parts.
 
 **Extension changes:** Edit source files in `lensmu/extension/src/` for popup components, or the root-level `.js` files for content scripts and background workers. The watcher will rebuild automatically, but you need to manually reload the extension in Chrome.
 
-**Adding a new OCR engine:** Create a new file in `lensmu/extension/ocr/`, export a `recognize` function that returns results in the normalized format (`[{ text, bbox, confidence, orientation }]`), and register it in the `OCR_REQUEST` handler in `background.js`.
+**Adding a new OCR engine:** Implement the provider and register it in the live `OCR_REQUEST` handler in `background.js`. Return the normalized format (`[{ text, bbox, confidence, orientation }]`).
 
 **Adding a new translation provider:** Create a new file in `lensmu/extension/translate/`, export a translation function, and register it in `translate-manager.js`.
 
@@ -73,9 +82,9 @@ The codebase is organized into two main parts.
 ## Running Tests
 
 ```bash
-cd lensmu/backend
-pip install pytest httpx
-pytest test_server.py -v
+cd lensmu/backend && pip install -r requirements-dev.txt && pytest test_server.py -v
+cd ../extension && npm ci && npm test && npm run build
+cd ../website && npm ci && npm run lint && npm run typecheck && npm run build
 ```
 
 If you add a new backend endpoint, please add corresponding tests in `test_server.py`.

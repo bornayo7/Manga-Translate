@@ -34,12 +34,32 @@ const OVERLAY_ALIGNMENT_OPTIONS = [
 
 const MIN_FONT_SIZE_OPTIONS = [8, 10, 12, 14, 16];
 const READ_ALOUD_TEST_TEXT = "This is a VisionTranslate read aloud test.";
+const DEFAULT_PROVIDER_MODELS = {
+  openai: "gpt-4o-mini",
+  claude: "claude-sonnet-4-20250514",
+  gemini: "gemini-2.0-flash",
+};
+
+const PROVIDER_MODEL_PREFIXES = {
+  openai: ["gpt-"],
+  claude: ["claude-"],
+  gemini: ["gemini-"],
+};
 
 function normalizeLoadedSettings(rawSettings = {}) {
   const nextSettings = { ...rawSettings };
 
   if (nextSettings.translationProvider === "google") {
     nextSettings.translationProvider = "libre";
+  }
+
+  const provider = nextSettings.translationProvider;
+  const prefixes = PROVIDER_MODEL_PREFIXES[provider];
+  if (
+    prefixes &&
+    !prefixes.some((prefix) => String(nextSettings.llmModel || "").startsWith(prefix))
+  ) {
+    nextSettings.llmModel = DEFAULT_PROVIDER_MODELS[provider];
   }
 
   return nextSettings;
@@ -319,6 +339,14 @@ export default function App() {
     }));
   };
 
+  const updateTranslationProvider = (provider) => {
+    setSettings((previous) => ({
+      ...previous,
+      translationProvider: provider,
+      llmModel: DEFAULT_PROVIDER_MODELS[provider] || previous.llmModel,
+    }));
+  };
+
   const selectedEngine =
     ENGINE_OPTIONS.find((option) => option.id === settings.ocrEngine) || ENGINE_OPTIONS[0];
   const selectedProvider =
@@ -411,6 +439,8 @@ export default function App() {
     setIsTranslating(true);
 
     try {
+      await persistSettingsSnapshot(settings);
+
       if (!tabState.active) {
         const toggleResponse = await sendRuntimeMessage({
           action: "TOGGLE_TRANSLATION",
@@ -424,7 +454,7 @@ export default function App() {
 
       await sendTabMessage(activeTabId, {
         action: "TRANSLATE_ALL_IMAGES",
-        payload: { settings },
+        payload: {},
       });
 
       window.close();
@@ -783,9 +813,7 @@ export default function App() {
 
               <TranslateSettings
                 provider={settings.translationProvider}
-                onProviderChange={(value) =>
-                  updateSetting("translationProvider", value)
-                }
+                onProviderChange={updateTranslationProvider}
                 openaiApiKey={settings.openaiApiKey}
                 onOpenaiApiKeyChange={(value) =>
                   updateSetting("openaiApiKey", value)
@@ -811,6 +839,10 @@ export default function App() {
                 customModelName={settings.customModelName}
                 onCustomModelNameChange={(value) =>
                   updateSetting("customModelName", value)
+                }
+                allowThirdPartyFallback={settings.allowThirdPartyFallback}
+                onAllowThirdPartyFallbackChange={(value) =>
+                  updateSetting("allowThirdPartyFallback", value)
                 }
               />
             </section>

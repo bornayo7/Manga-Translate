@@ -11,12 +11,13 @@ import base64
 import binascii
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 if __package__:
     from .security import add_security_middleware, validate_image_size
@@ -61,6 +62,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vt")
 
+MAX_MANGA_REGIONS = 200
+MAX_MANGA_COORDINATE = 100_000
+MAX_MANGA_TOTAL_REGION_PIXELS = 50_000_000
+
 
 # -- Request / Response schemas ------------------------------------------------
 
@@ -95,10 +100,36 @@ class MangaOCRRequest(BaseModel):
         ...,
         description="Base64-encoded image (same one sent to /ocr/paddle).",
     )
-    bboxes: list[list[int]] = Field(
+    bboxes: list[list[StrictInt]] = Field(
         ...,
+        min_length=1,
+        max_length=MAX_MANGA_REGIONS,
         description="Bounding boxes from PaddleOCR, each [x1, y1, x2, y2].",
     )
+
+    @field_validator("bboxes")
+    @classmethod
+    def validate_bboxes(cls, bboxes: list[list[int]]) -> list[list[int]]:
+        total_area = 0
+        for index, bbox in enumerate(bboxes):
+            if len(bbox) != 4:
+                raise ValueError(f"bbox {index} must contain exactly four coordinates")
+
+            x1, y1, x2, y2 = bbox
+            if any(isinstance(value, bool) or not isinstance(value, int) for value in bbox):
+                raise ValueError(f"bbox {index} coordinates must be integers")
+            if any(value < 0 or value > MAX_MANGA_COORDINATE for value in bbox):
+                raise ValueError(
+                    f"bbox {index} coordinates must be between 0 and {MAX_MANGA_COORDINATE}"
+                )
+            if x2 <= x1 or y2 <= y1:
+                raise ValueError(f"bbox {index} must satisfy x2 > x1 and y2 > y1")
+
+            total_area += (x2 - x1) * (y2 - y1)
+            if total_area > MAX_MANGA_TOTAL_REGION_PIXELS:
+                raise ValueError("aggregate bounding-box area exceeds the request limit")
+
+        return bboxes
 
 
 class MangaOCRDetection(BaseModel):
@@ -325,8 +356,8 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
+        app,
+        host=os.getenv("VISIONTRANSLATE_HOST", "127.0.0.1"),
         port=8000,
         reload=False,
         log_level="info",

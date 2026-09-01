@@ -13,12 +13,13 @@ export const syncedPreferencesSchema = z
     sourceLanguage: boundedString(32),
     targetLanguage: boundedString(32),
     translationProvider: boundedString(32),
+    allowThirdPartyFallback: z.boolean(),
     llmModel: boundedString(128),
     minImageWidth: z.number().int().min(1).max(4096),
     minImageHeight: z.number().int().min(1).max(4096),
     showConfidenceBorders: z.boolean(),
     autoTranslate: z.boolean(),
-    maxConcurrentImages: z.number().int().min(1).max(32),
+    maxConcurrentImages: z.number().int().min(1).max(12),
     ocrEngine: boundedString(32),
     fontOverride: boundedString(120),
     overlayFontFamily: boundedString(32),
@@ -34,7 +35,7 @@ export const syncedPreferencesSchema = z
     elevenLabsStability: z.number().min(0).max(1),
     elevenLabsSimilarityBoost: z.number().min(0).max(1),
     elevenLabsStyle: z.number().min(0).max(1),
-    elevenLabsSpeed: z.number().min(0.5).max(2),
+    elevenLabsSpeed: z.number().min(0.7).max(1.2),
   })
   .strict();
 

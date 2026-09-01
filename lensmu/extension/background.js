@@ -64,6 +64,9 @@ import { getSettings, saveSettings, getDisabledDomains, addDisabledDomain, remov
 import { translateTexts } from './translate/translate-manager.js';
 import { login as auth0Login, logout as auth0Logout, getAuthState } from './auth/auth0.js';
 import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation } from './tts/elevenlabs.js';
+import { toContentScriptSettings } from './shared/preferences.js';
+import { fetchWithTimeout } from './shared/fetch-with-timeout.js';
+import { readResponseBytesWithLimit } from './shared/response-limits.js';
 
 /*
  * --------------------------------------------------------------------------
@@ -86,6 +89,8 @@ import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation 
  */
 const tabStates = new Map();
 const REQUEST_TIMEOUT_MS = 30000;
+const IMAGE_FETCH_TIMEOUT_MS = 15000;
+const MAX_FETCH_IMAGE_BYTES = 10 * 1024 * 1024;
 const PADDLE_LANGUAGE_ALIASES = Object.freeze({
   auto: 'japan',
   ja: 'japan',
@@ -118,35 +123,8 @@ function getTabState(tabId) {
   return tabStates.get(tabId);
 }
 
-function sanitizeForLog(value, key = '') {
-  if (/api.?key|token|secret/i.test(key)) {
-    return value ? '[redacted]' : '';
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeForLog(item));
-  }
-
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([entryKey, entryValue]) => [
-        entryKey,
-        sanitizeForLog(entryValue, entryKey)
-      ])
-    );
-  }
-
-  return value;
-}
-
-async function getMessageSettings(payload = {}) {
-  const storedSettings = await getSettings();
-  return {
-    ...storedSettings,
-    ...(payload?.settings && typeof payload.settings === 'object'
-      ? payload.settings
-      : {})
-  };
+async function getMessageSettings() {
+  return getSettings();
 }
 
 /*
@@ -471,53 +449,18 @@ async function sendToContentScript(tabId, message) {
 
 /*
  * --------------------------------------------------------------------------
- * Helper: Proxy Fetch for Content Script (CORS Bypass)
+ * Helper: Bounded JSON/text fetch for background-owned OCR providers
  * --------------------------------------------------------------------------
- * Content scripts are subject to the page's CORS policy, which means they
- * often CANNOT make requests to our backend or translation APIs directly.
- *
- * The background service worker, however, has its own origin
- * (chrome-extension://...) and the host_permissions in the manifest
- * grant it access to the listed domains WITHOUT CORS restrictions.
- *
- * So the flow is:
- *   1. Content script sends a message: { action: "PROXY_FETCH", payload: { url, options } }
- *   2. Background receives it and performs the fetch here.
- *   3. Background sends the response data back to the content script.
- *
- * This is a very common pattern in browser extensions.
+ * Network access stays in the trusted service worker. Content scripts send
+ * typed OCR/translation requests and never receive a general-purpose proxy.
  */
 async function proxyFetch(url, options = {}) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  const upstreamSignal = options.signal;
-  const abortFromUpstream = () => controller.abort();
-
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort();
-    } else {
-      upstreamSignal.addEventListener('abort', abortFromUpstream, { once: true });
-    }
-  }
-
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-
-    /*
-     * We need to serialize the response to send it back via message
-     * passing. Messages must be JSON-serializable, so we cannot send
-     * the raw Response object. We read the body as text or JSON
-     * depending on the content type.
-     */
+    const response = await fetchWithTimeout(url, options, REQUEST_TIMEOUT_MS);
     const contentType = response.headers.get('content-type') || '';
-    let body;
-
-    if (contentType.includes('application/json')) {
-      body = await response.json();
-    } else {
-      body = await response.text();
-    }
+    const body = contentType.includes('application/json')
+      ? await response.json()
+      : await response.text();
 
     return {
       ok: response.ok,
@@ -527,25 +470,13 @@ async function proxyFetch(url, options = {}) {
       body
     };
   } catch (error) {
-    /*
-     * Network errors (server down, DNS failure, etc.) throw here.
-     * We return a structured error so the content script can handle it.
-     */
     return {
       ok: false,
       status: 0,
-      statusText: error?.name === 'AbortError' ? 'Request Timeout' : 'Network Error',
+      statusText: 'Network Error',
       headers: {},
-      body: {
-        error:
-          error?.name === 'AbortError'
-            ? `Request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds.`
-            : error.message
-      }
+      body: { error: error.message }
     };
-  } finally {
-    clearTimeout(timeoutId);
-    upstreamSignal?.removeEventListener?.('abort', abortFromUpstream);
   }
 }
 
@@ -604,7 +535,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
  * the service worker). For service worker lifecycle, we just run
  * restoration code at the top level.
  */
-restoreTabStates().then(() => {
+const tabStatesReady = restoreTabStates().then(() => {
   console.log('[VisionTranslate] Tab states restored from storage.');
 });
 
@@ -619,6 +550,7 @@ restoreTabStates().then(() => {
  * command automatically opens the popup, so we don't need to handle it.
  */
 chrome.commands.onCommand.addListener(async (command, tab) => {
+  await tabStatesReady;
   console.log(`[VisionTranslate] Command received: ${command} on tab ${tab?.id}`);
 
   if (command === 'toggle-translation' && tab?.id) {
@@ -633,7 +565,8 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
  * Clean up state when a tab is closed. Without this, the tabStates Map
  * would grow indefinitely as the user opens and closes tabs.
  */
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await tabStatesReady;
   if (tabStates.has(tabId)) {
     tabStates.delete(tabId);
     persistTabStates();
@@ -653,6 +586,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
  * changeInfo.status === 'loading' fires when a new navigation starts.
  */
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  await tabStatesReady;
   if (changeInfo.status === 'loading' && tabStates.has(tabId)) {
     const state = getTabState(tabId);
     state.active = false;
@@ -681,7 +615,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         if (!state.active) {
           const response = await sendToContentScript(tabId, {
             action: 'ACTIVATE',
-            payload: { settings }
+            payload: { settings: toContentScriptSettings(settings) }
           });
           if (response !== null) {
             state.active = true;
@@ -723,15 +657,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
    * the message channel open for the async response.
    */
   (async () => {
+    await tabStatesReady;
     const action = typeof message?.action === 'string' ? message.action : null;
     const payload = message?.payload ?? {};
     const tabId = sender.tab?.id;
 
-    console.log(`[VisionTranslate] Message received:`, {
-      action,
-      tabId,
-      payload: sanitizeForLog(payload)
-    });
+    console.log('[VisionTranslate] Message received:', { action, tabId });
 
     switch (action) {
       /*
@@ -773,25 +704,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       /*
-       * ---- PROXY_FETCH ----
-       * Sent by the content script when it needs to make a cross-origin
-       * request (e.g., to our OCR backend or a translation API).
-       * The background worker performs the fetch and returns the result.
-       */
-      case 'PROXY_FETCH': {
-        const { url, options } = payload;
-        const result = await proxyFetch(url, options);
-        sendResponse(result);
-        break;
-      }
-
-      /*
        * ---- OCR_REQUEST ----
        * Sent by the content script with a base64-encoded image.
        * We route it to the configured OCR engine.
        */
       case 'OCR_REQUEST': {
-        const settings = await getMessageSettings(payload);
+        const settings = await getMessageSettings();
         const engine = normalizeOcrEngine(settings.ocrEngine);
         const backendUrl = settings.backendUrl || 'http://localhost:8000';
         const rawImage = stripDataUrlPrefix(payload.imageBase64);
@@ -898,17 +816,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             /*
              * Google Cloud Vision: call the API directly from the service worker.
              */
-            const apiKey =
-              settings.customOcrApiKey ||
-              settings.googleCloudApiKey ||
-              settings.googleVisionApiKey ||
-              settings.cloudVisionApiKey;
+            const apiKey = settings.googleCloudApiKey;
             if (!apiKey) {
               sendResponse({ ok: false, body: { error: 'Google Cloud Vision requires an API key. Set it in extension settings.' } });
               break;
             }
 
-            const visionResponse = await fetch(
+            const visionResponse = await fetchWithTimeout(
               `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey)}`,
               {
                 method: 'POST',
@@ -1035,7 +949,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
          * does NOT go through the Python backend — the APIs are called
          * directly from the extension's service worker context.
          */
-        const settings = await getMessageSettings(payload);
+        const settings = await getMessageSettings();
         const sourceLang = payload.sourceLang || 'auto';
         const targetLang = payload.targetLang || settings.targetLanguage || 'en';
 
@@ -1045,10 +959,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sourceLang,
             targetLang,
             textCount: payload.texts?.length || 0,
-            texts: (payload.texts || []).map((text, index) => ({
-              index,
-              text: String(text || '').replace(/\s+/g, ' ').trim()
-            }))
+            characterCount: (payload.texts || []).reduce(
+              (total, text) => total + String(text || '').length,
+              0
+            )
           });
 
           const result = await translateTexts(
@@ -1065,10 +979,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sourceLang: result.sourceLang || sourceLang,
             targetLang: result.targetLang || targetLang,
             diagnostics: result.diagnostics || null,
-            translations: (result.translations || []).map((text, index) => ({
-              index,
-              text: String(text || '').replace(/\s+/g, ' ').trim()
-            }))
+            translationCount: result.translations?.length || 0
           });
 
           sendResponse({
@@ -1099,7 +1010,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * This stays separate from OCR and translation and uses the stored API key.
        */
       case 'LOAD_ELEVENLABS_VOICES': {
-        const settings = await getMessageSettings(payload);
+        const settings = await getMessageSettings();
 
         try {
           const voices = await loadElevenLabsVoices(settings);
@@ -1124,7 +1035,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * returned, but the network request stays in the background worker.
        */
       case 'TEST_ELEVENLABS_VOICE': {
-        const settings = await getMessageSettings(payload);
+        const settings = await getMessageSettings();
 
         try {
           const audioResult = await generateReadAloudAudio({
@@ -1180,7 +1091,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * the audio by text, image fingerprint, language, and voice settings.
        */
       case 'GENERATE_READ_ALOUD_AUDIO': {
-        const settings = await getMessageSettings(payload);
+        const settings = await getMessageSettings();
 
         try {
           const audioResult = await generateReadAloudAudio({
@@ -1213,8 +1124,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'UPDATE_PROGRESS': {
         if (tabId) {
           const state = getTabState(tabId);
-          state.imageCount = payload.total || state.imageCount;
-          state.translatedCount = payload.completed || state.translatedCount;
+          state.imageCount = payload.total ?? state.imageCount;
+          state.translatedCount = payload.completed ?? state.translatedCount;
 
           /*
            * Show progress on the badge: "2/5" means 2 of 5 images done.
@@ -1250,14 +1161,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'FETCH_IMAGE': {
         const { url } = payload;
         try {
-          const response = await fetch(url);
+          const parsedUrl = new URL(url);
+          if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+            throw new Error('Only HTTP(S) image URLs are supported.');
+          }
+
+          const response = await fetchWithTimeout(
+            parsedUrl.href,
+            { method: 'GET', redirect: 'follow', credentials: 'omit' },
+            IMAGE_FETCH_TIMEOUT_MS
+          );
           if (!response.ok) {
             sendResponse({ ok: false, error: `HTTP ${response.status}` });
             break;
           }
 
-          const arrayBuffer = await response.arrayBuffer();
-          const bytes = new Uint8Array(arrayBuffer);
+          const contentType = (response.headers.get('content-type') || '')
+            .split(';', 1)[0]
+            .trim()
+            .toLowerCase();
+          if (!contentType.startsWith('image/')) {
+            throw new Error('Fetched resource is not an image.');
+          }
+
+          const bytes = await readResponseBytesWithLimit(response, MAX_FETCH_IMAGE_BYTES);
 
           let binary = '';
           const chunkSize = 8192;
@@ -1267,7 +1194,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const base64 = btoa(binary);
 
-          const contentType = response.headers.get('content-type') || 'image/png';
           const dataUrl = `data:${contentType};base64,${base64}`;
 
           sendResponse({ ok: true, dataUrl });
@@ -1284,7 +1210,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        */
       case 'GET_SETTINGS': {
         const settings = await getSettings();
-        sendResponse({ settings });
+        sendResponse({ settings: sender.tab ? toContentScriptSettings(settings) : settings });
         break;
       }
 
@@ -1294,6 +1220,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * We save them and notify all active content scripts.
        */
       case 'SAVE_SETTINGS': {
+        if (sender.tab) {
+          sendResponse({
+            success: false,
+            error: 'Settings can only be changed from an extension page.'
+          });
+          break;
+        }
         const savedSettings = await saveSettings(payload.settings);
 
         /*
@@ -1305,7 +1238,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (state.active) {
             await sendToContentScript(activeTabId, {
               action: 'SETTINGS_UPDATED',
-              payload: { settings: savedSettings }
+              payload: { settings: toContentScriptSettings(savedSettings) }
             });
           }
         }
@@ -1401,8 +1334,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  *   4. Persists the new state.
  */
 async function toggleTranslation(tabId) {
+  await tabStatesReady;
   const state = getTabState(tabId);
-  state.active = !state.active;
+  const shouldActivate = !state.active;
 
   /*
    * Get the tab's hostname so we can persist the per-domain preference.
@@ -1417,21 +1351,17 @@ async function toggleTranslation(tabId) {
     /* Tab may have been closed */
   }
 
-  if (state.active) {
+  if (shouldActivate) {
     /*
      * --- ACTIVATE ---
      * Load current settings and send them along with the activation
      * message so the content script has everything it needs immediately.
      */
-    if (hostname) {
-      await removeDisabledDomain(hostname);
-    }
-
     const settings = await getSettings();
 
     const response = await sendToContentScript(tabId, {
       action: 'ACTIVATE',
-      payload: { settings }
+      payload: { settings: toContentScriptSettings(settings) }
     });
 
     /*
@@ -1442,6 +1372,11 @@ async function toggleTranslation(tabId) {
     if (response === null) {
       console.warn(`[VisionTranslate] Content script not available on tab ${tabId}. Reverting state.`);
       state.active = false;
+    } else {
+      state.active = true;
+      if (hostname) {
+        await removeDisabledDomain(hostname);
+      }
     }
 
   } else {
@@ -1458,6 +1393,8 @@ async function toggleTranslation(tabId) {
       action: 'DEACTIVATE',
       payload: {}
     });
+
+    state.active = false;
 
     /* Reset progress counters */
     state.imageCount = 0;

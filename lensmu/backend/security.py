@@ -105,6 +105,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: dict[str, list[float]] = defaultdict(list)
+        self.last_cleanup = 0.0
 
     async def dispatch(self, request: Request, call_next) -> Response:
         if request.url.path == "/health":
@@ -113,6 +114,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else "unknown"
         now = time.time()
         cutoff = now - self.window_seconds
+
+        if now - self.last_cleanup >= self.window_seconds:
+            active_requests = {
+                ip: [timestamp for timestamp in timestamps if timestamp > cutoff]
+                for ip, timestamps in self.requests.items()
+            }
+            self.requests = defaultdict(
+                list,
+                {ip: timestamps for ip, timestamps in active_requests.items() if timestamps},
+            )
+            self.last_cleanup = now
 
         self.requests[client_ip] = [
             t for t in self.requests[client_ip] if t > cutoff

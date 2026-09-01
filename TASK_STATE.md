@@ -2,9 +2,9 @@
 
 ## Current goal
 
-Reduce assistant token/context usage while also cleaning up one concrete source of repo drift.
+Keep the security/reliability repair green and finish the product decisions that require deployed credentials or browser-specific release work.
 
-## Immediate implementation targets
+## Completed implementation targets
 
 ### A. Add reusable context files
 Add these files so Codex and Claude do not have to rediscover the repo every session:
@@ -15,8 +15,8 @@ Add these files so Codex and Claude do not have to rediscover the repo every ses
 - `TASK_STATE.md`
 - `DECISIONS.md`
 
-### B. Add canonical shared preferences module
-Add:
+### B. Canonical shared preferences module
+Implemented:
 - `lensmu/extension/shared/preferences.js`
 
 Reason:
@@ -27,17 +27,14 @@ The website already imports `../../extension/shared/preferences.js` from:
 That path should become real and authoritative.
 
 ### C. Normalize extension storage
-`lensmu/extension/utils/storage.js` currently:
-- defines `SETTINGS_KEY`
-- reads all of `chrome.storage.local`
-- writes merged settings directly at top level
-- listens for `changes[SETTINGS_KEY]`
+Reads, writes, and change listeners use the `vt_settings` object. Provider secrets are local-only and are removed from all content-script messages.
 
-This should be normalized so reads, writes, and change listeners all use the same storage shape.
+### D. Audit repair
+The deterministic audit findings are fixed: bounded image/MangaOCR requests, serialized Tesseract, reversible page styles, safe logging, robust text chunking, opt-in public fallback, request timeouts, transactional activation, CI, and stale setup targets.
 
 ## Success criteria
 
-1. Website build no longer fails because the shared preferences module is missing
-2. Settings defaults are defined in one place
-3. Synced preferences exclude secrets
-4. Coding assistants can start from the context files instead of scanning the full repo
+1. Keep extension tests/build, website lint/typecheck/build, and backend tests green in CI.
+2. Configure Auth0 audience/scopes before enabling preference sync.
+3. Add a Firefox-specific manifest and real-browser coverage before restoring Firefox claims.
+4. Run real PaddleOCR/MangaOCR and provider smoke tests with local credentials.
