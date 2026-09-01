@@ -1,8 +1,11 @@
 // Chrome storage helpers for extension settings and API keys.
 
-import { DEFAULT_EXTENSION_SETTINGS, mergeWithDefaults } from '../shared/preferences.js';
+import {
+  DEFAULT_EXTENSION_SETTINGS,
+  SETTINGS_STORAGE_KEY as SETTINGS_KEY,
+  mergeWithDefaults
+} from '../shared/preferences.js';
 
-const SETTINGS_KEY = 'vt_settings';
 const LEGACY_SETTING_KEYS = Object.freeze(Object.keys(DEFAULT_EXTENSION_SETTINGS));
 
 function getLegacySettings(storageSnapshot = {}) {

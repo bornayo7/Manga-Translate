@@ -3,6 +3,9 @@
 
 export const PREFERENCE_SCHEMA_VERSION = 2;
 
+// chrome.storage.local key holding the merged settings object.
+export const SETTINGS_STORAGE_KEY = 'vt_settings';
+
 export const DEFAULT_EXTENSION_SETTINGS = {
   targetLanguage: 'en',
   sourceLanguage: 'auto',
