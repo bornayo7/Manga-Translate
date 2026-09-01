@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 
 import { AppAuthProvider } from "@/components/auth/AppAuthProvider";
-import { auth0 } from "@/lib/auth0";
-import { isAuth0Enabled } from "@/lib/auth0";
+import { auth0, isAuth0Enabled } from "@/lib/auth0";
 import "./globals.css";
 
 export const metadata: Metadata = {
