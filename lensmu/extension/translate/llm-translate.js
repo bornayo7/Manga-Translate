@@ -516,6 +516,7 @@ function getLanguageName(code) {
     'en': 'English',
     'ja': 'Japanese',
     'zh': 'Chinese (Simplified)',
+    'zh-CN': 'Chinese (Simplified)',
     'zh-TW': 'Chinese (Traditional)',
     'ko': 'Korean',
     'es': 'Spanish',
