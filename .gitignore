@@ -19,9 +19,3 @@ lensmu/website/.next/
 # IDE
 .vscode/
 .idea/
-
-# Claude / AI agent files — never commit
-CLAUDE.md
-CLAUDE.local.md
-AGENTS.md
-.claude/
