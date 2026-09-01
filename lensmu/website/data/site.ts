@@ -195,22 +195,3 @@ export const contactLinks = [
   projectGithub
 ];
 
-export const githubLinks = teamMembers
-  .filter(
-    (member): member is TeamMember & { github: string } =>
-      Boolean(member.github)
-  )
-  .map((member) => ({
-    label: member.name,
-    href: member.github
-  }));
-
-export const linkedinLinks = teamMembers
-  .filter(
-    (member): member is TeamMember & { linkedin: string } =>
-      Boolean(member.linkedin)
-  )
-  .map((member) => ({
-    label: member.name,
-    href: member.linkedin
-  }));
