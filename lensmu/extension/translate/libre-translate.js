@@ -93,7 +93,7 @@ function ensureTranslatedText(rawTranslatedText, originalText, providerName) {
  */
 export async function translateWithMyMemory(texts, sourceLang, targetLang) {
   try {
-    const translations = await translateWithMyMemory(texts, sourceLang, targetLang);
+    const translations = await translateEachText(texts, sourceLang, targetLang);
     return {
       translations,
       sourceLang,
@@ -139,7 +139,7 @@ export async function translateWithMyMemory(texts, sourceLang, targetLang) {
  * @param {string}   targetLang — Target language code
  * @returns {Promise<string[]>} — Translated texts
  */
-async function translateWithMyMemory(texts, sourceLang, targetLang) {
+async function translateEachText(texts, sourceLang, targetLang) {
   const translations = [];
 
   for (let i = 0; i < texts.length; i++) {
