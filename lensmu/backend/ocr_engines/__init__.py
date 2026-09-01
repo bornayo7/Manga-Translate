@@ -23,8 +23,10 @@
 #   Step 4: Extension overlays translated text on the page
 # =============================================================================
 
-# Imports are done conditionally in server.py so the server can start
-# even if OCR dependencies aren't installed. Don't import here to avoid
-# forcing the ImportError at package-level.
-
-__all__ = ["PaddleOCREngine", "MangaOCREngine"]
+# Imports are done conditionally in server.py so the server can start even if
+# OCR dependencies aren't installed. Nothing is re-exported here on purpose:
+# importing the engines at package level would force the ImportError that
+# server.py exists to catch. Import them from their own modules:
+#
+#   from ocr_engines.paddle_ocr import PaddleOCREngine
+#   from ocr_engines.manga_ocr import MangaOCREngine
