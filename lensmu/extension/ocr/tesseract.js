@@ -318,12 +318,6 @@ async function initializeWorker(language) {
  * @returns {Promise<object>} The Tesseract.js library object
  */
 async function loadTesseractLibrary() {
-  // First, check if Tesseract is already available globally.
-  // This happens when it's loaded via a <script> tag or importScripts().
-  if (typeof globalThis.Tesseract !== 'undefined') {
-    return globalThis.Tesseract;
-  }
-
   if (bundledTesseract?.createWorker) {
     return bundledTesseract;
   }
