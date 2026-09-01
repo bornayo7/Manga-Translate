@@ -72,6 +72,13 @@ export const SETTING_KEYS: readonly (keyof ExtensionSettings)[];
 export const SYNCED_PREFERENCE_KEYS: readonly (keyof SyncedPreferences)[];
 export const DEFAULT_SYNCED_PREFERENCES: Readonly<SyncedPreferences>;
 
+export function clampNumber(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number
+): number;
+
 export function mergeWithDefaults(
   partial?: Partial<ExtensionSettings>
 ): ExtensionSettings;

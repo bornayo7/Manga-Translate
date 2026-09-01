@@ -1,18 +1,7 @@
 import { recognize } from '../ocr/tesseract.js';
+import { toErrorMessage } from '../shared/text.js';
 
 const OFFSCREEN_TESSERACT_TARGET = 'offscreen-tesseract';
-
-function toErrorMessage(error, fallback = 'Unknown error') {
-  if (typeof error === 'string' && error.trim()) {
-    return error;
-  }
-
-  if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) {
-    return error.message;
-  }
-
-  return fallback;
-}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target !== OFFSCREEN_TESSERACT_TARGET || message?.action !== 'RUN_TESSERACT_OCR') {

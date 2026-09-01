@@ -1,5 +1,5 @@
 import { fetchWithTimeout } from "../shared/fetch-with-timeout.js";
-import { DEFAULT_EXTENSION_SETTINGS } from "../shared/preferences.js";
+import { DEFAULT_EXTENSION_SETTINGS, clampNumber } from "../shared/preferences.js";
 
 const AUDIO_CACHE_STORAGE_KEY = "vt_elevenlabs_audio_cache";
 const AUDIO_INDEX_STORAGE_KEY = "vt_elevenlabs_audio_index";
@@ -16,16 +16,6 @@ const DEFAULT_ELEVENLABS_SETTINGS = {
   elevenLabsStyle: DEFAULT_EXTENSION_SETTINGS.elevenLabsStyle,
   elevenLabsSpeed: DEFAULT_EXTENSION_SETTINGS.elevenLabsSpeed,
 };
-
-function clampNumber(value, min, max, fallback) {
-  const numericValue = Number(value);
-
-  if (!Number.isFinite(numericValue)) {
-    return fallback;
-  }
-
-  return Math.min(max, Math.max(min, numericValue));
-}
 
 function normalizeElevenLabsSettings(settings = {}) {
   const merged = {

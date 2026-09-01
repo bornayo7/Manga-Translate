@@ -1,15 +1,6 @@
 import React from "react";
 import ApiKeyInput from "./ApiKeyInput.jsx";
-
-function clampNumber(value, min, max, fallback) {
-  const numericValue = Number(value);
-
-  if (!Number.isFinite(numericValue)) {
-    return fallback;
-  }
-
-  return Math.min(max, Math.max(min, numericValue));
-}
+import { clampNumber } from "../../../shared/preferences.js";
 
 function RangeField({
   id,

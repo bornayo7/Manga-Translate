@@ -43,6 +43,7 @@
  */
 import { chunkText } from '../shared/text-chunking.js';
 import { fetchWithTimeout } from '../shared/fetch-with-timeout.js';
+import { isEffectivelyIdenticalTranslation } from '../shared/text.js';
 
 const MYMEMORY_CHAR_LIMIT = 500;
 
@@ -51,18 +52,6 @@ const MYMEMORY_CHAR_LIMIT = 500;
  * MyMemory allows ~10 requests/second for anonymous users.
  */
 const REQUEST_DELAY_MS = 100;
-
-function normalizeForComparison(text) {
-  return String(text || '')
-    .normalize('NFKC')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function isEffectivelyIdenticalTranslation(sourceText, translatedText) {
-  return normalizeForComparison(sourceText) === normalizeForComparison(translatedText);
-}
 
 function ensureTranslatedText(rawTranslatedText, originalText, providerName) {
   const cleaned = String(rawTranslatedText || '')

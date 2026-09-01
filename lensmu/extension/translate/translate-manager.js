@@ -10,6 +10,7 @@
 
 import { translateWithLLM } from './llm-translate.js';
 import { translateWithMyMemory } from './libre-translate.js';
+import { isEffectivelyIdenticalTranslation } from '../shared/text.js';
 
 const PROVIDER_MODEL_RULES = Object.freeze({
   openai: { prefix: 'gpt-', fallback: 'gpt-4o-mini' },
@@ -25,18 +26,6 @@ export function resolveProviderModel(provider, configuredModel) {
 
   const model = String(configuredModel || '').trim();
   return model.startsWith(rule.prefix) ? model : rule.fallback;
-}
-
-function normalizeForComparison(text) {
-  return String(text || '')
-    .normalize('NFKC')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function isEffectivelyIdenticalTranslation(sourceText, translatedText) {
-  return normalizeForComparison(sourceText) === normalizeForComparison(translatedText);
 }
 
 const LANGUAGE_ALIASES = {
