@@ -32,6 +32,17 @@ Reads, writes, and change listeners use the `vt_settings` object. Provider secre
 ### D. Audit repair
 The deterministic audit findings are fixed: bounded image/MangaOCR requests, serialized Tesseract, reversible page styles, safe logging, robust text chunking, opt-in public fallback, request timeouts, transactional activation, CI, and stale setup targets.
 
+### E. Review pass 2026-09-01
+Second full read of the tree with every suite run first. Fixed a blocker that
+made `npm test` exit 1 and broke all translation (duplicate
+`translateWithMyMemory` declaration in `translate/libre-translate.js`), plus
+three more defects: a MangaOCR bbox the backend rejects by construction,
+dropped MutationObserver src-change invalidations, and `_polygon_to_bbox`
+truncating instead of containing. Swept duplicated helpers into
+`extension/shared/text.js`, removed ~15 dead symbols, two dead website files
+and 66 lines of dead popup CSS. See `AUDIT.md` for the full table, including
+what was deliberately left open.
+
 ## Success criteria
 
 1. Keep extension tests/build, website lint/typecheck/build, and backend tests green in CI.
