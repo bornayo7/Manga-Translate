@@ -36,10 +36,10 @@
 import io
 import inspect
 import logging
+import math
 import os
 import threading
 from collections import OrderedDict
-from typing import Optional
 
 import numpy as np
 from PIL import Image
@@ -73,11 +73,11 @@ class PaddleOCREngine:
     """
 
     # --- Singleton machinery ---------------------------------------------------
-    # _instance holds the single PaddleOCREngine object.
-    # _lock prevents two threads from creating the instance simultaneously
+    # _instances is an LRU of one engine per language, capped at
+    # _max_cached_languages because each loaded model costs real memory.
+    # _lock prevents two threads from creating an instance simultaneously
     # (this can happen if two HTTP requests arrive at the same time before
     # the model is loaded).
-    _instance: Optional["PaddleOCREngine"] = None
     _instances: "OrderedDict[str, PaddleOCREngine]" = OrderedDict()
     _lock: threading.Lock = threading.Lock()
     _max_cached_languages = 2
@@ -133,8 +133,6 @@ class PaddleOCREngine:
             else:
                 cls._instances.move_to_end(normalized_language)
 
-            # Keep the legacy attribute as an alias for diagnostics and older code.
-            cls._instance = instance
             return instance
 
     @classmethod
@@ -410,11 +408,15 @@ class PaddleOCREngine:
         x_coords = [point[0] for point in polygon]
         y_coords = [point[1] for point in polygon]
 
+        # Floor the minimums and ceil the maximums so the rectangle actually
+        # contains every corner. Truncating with int() pulls both edges toward
+        # zero, which shrinks the box on the right/bottom and can clip the last
+        # glyph out of the crop that MangaOCR later receives.
         return [
-            int(min(x_coords)),   # x_min (left edge)
-            int(min(y_coords)),   # y_min (top edge)
-            int(max(x_coords)),   # x_max (right edge)
-            int(max(y_coords)),   # y_max (bottom edge)
+            math.floor(min(x_coords)),   # x_min (left edge)
+            math.floor(min(y_coords)),   # y_min (top edge)
+            math.ceil(max(x_coords)),    # x_max (right edge)
+            math.ceil(max(y_coords)),    # y_max (bottom edge)
         ]
 
     @staticmethod
