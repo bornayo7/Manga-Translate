@@ -181,7 +181,6 @@ let imageStates = new WeakMap();
 let pageObserver = null;
 
 /* Reference to the toolbar shadow DOM container */
-let toolbarContainer = null;
 
 /*
  * Set of translate-icon buttons we've added to images, so we can
@@ -2257,10 +2256,6 @@ function addTranslateIcons() {
       setTimeout(() => { translateAllBtn.innerHTML = "Translate All"; }, 2000);
     });
 
-    /* Show icon on hover over the image area */
-    const showIcon = () => { /* iconContainer is always visible */ };
-    const hideIcon = () => { /* iconContainer is always visible */ };
-
     /* Click handler: translate just this image */
     icon.addEventListener('click', async (e) => {
       e.preventDefault();
@@ -2329,8 +2324,6 @@ function addTranslateIcons() {
       icon,
       iconContainer,
       anchor: iconAnchor,
-      showIcon,
-      hideIcon,
       translateAllBtn,
       readAloudButton: null,
       failureNotice: null
@@ -2344,9 +2337,7 @@ function addTranslateIcons() {
  * Remove all translate icons from the page.
  */
 function removeTranslateIcons() {
-  for (const { icon, iconContainer, anchor, showIcon, hideIcon } of translateIcons) {
-    anchor.removeEventListener('mouseenter', showIcon);
-    anchor.removeEventListener('mouseleave', hideIcon);
+  for (const { icon, iconContainer } of translateIcons) {
     if (iconContainer) iconContainer.remove(); else icon.remove();
   }
   translateIcons.clear();
@@ -2470,6 +2461,14 @@ function setupMutationObserver() {
    */
   let debounceTimer = null;
 
+  /*
+   * Images whose src/srcset changed since the last flush. The debounce
+   * restarts the timer on every relevant batch, so the callback that
+   * eventually runs only ever sees the final batch — anything collected
+   * earlier has to be accumulated here or it is silently dropped.
+   */
+  const imagesPendingInvalidation = new Set();
+
   pageObserver = new MutationObserver((mutationsList) => {
     /*
      * Quick check: do any of the mutations involve image-related changes?
@@ -2496,6 +2495,13 @@ function setupMutationObserver() {
           }
         }
       } else if (mutation.type === 'attributes') {
+        if (
+          mutation.target.tagName === 'IMG' &&
+          (mutation.attributeName === 'src' || mutation.attributeName === 'srcset')
+        ) {
+          imagesPendingInvalidation.add(mutation.target);
+        }
+
         /*
          * Attribute mutations: an image's src might have changed
          * (lazy loading often sets src from data-src). We also watch
@@ -2533,18 +2539,14 @@ function setupMutationObserver() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       if (!isActive) {
+        imagesPendingInvalidation.clear();
         return;
       }
 
-      for (const mutation of mutationsList) {
-        if (
-          mutation.type === 'attributes' &&
-          mutation.target?.tagName === 'IMG' &&
-          (mutation.attributeName === 'src' || mutation.attributeName === 'srcset')
-        ) {
-          invalidateImageState(mutation.target, 'img-src-updated');
-        }
+      for (const imageElement of imagesPendingInvalidation) {
+        invalidateImageState(imageElement, 'img-src-updated');
       }
+      imagesPendingInvalidation.clear();
 
       console.log('[VisionTranslate] New or updated images detected. Refreshing discovery only.');
       addTranslateIcons();
@@ -2574,62 +2576,6 @@ function setupMutationObserver() {
   });
 
   console.log('[VisionTranslate] MutationObserver active — watching for new images');
-}
-
-/*
- * --------------------------------------------------------------------------
- * UI: Create the floating toolbar (in Shadow DOM)
- * --------------------------------------------------------------------------
- * The toolbar gives the user controls to:
- *   - Toggle translations on/off
- *   - See translation progress
- *   - Quick-toggle individual images
- *
- * We use Shadow DOM so our CSS is completely isolated from the page.
- *
- * SHADOW DOM EXPLAINER:
- * Shadow DOM creates an encapsulated DOM subtree. The page's CSS
- * cannot style elements inside the shadow, and our CSS cannot leak
- * out to the page. This is crucial because every website has different
- * CSS that would break our toolbar layout.
- *
- * Structure:
- *   <div id="vt-lensmu-toolbar-host">   (in the page DOM)
- *     #shadow-root                       (shadow boundary)
- *       <style>...</style>               (our isolated CSS)
- *       <div class="toolbar">            (our toolbar HTML)
- *         ...
- *       </div>
- */
-function createToolbar() { /* Toolbar removed */ }
-
-/*
- * --------------------------------------------------------------------------
- * UI: Update toolbar status text
- * --------------------------------------------------------------------------
- */
-function updateToolbarStatus(text) { /* Toolbar removed */ }
-
-/*
- * --------------------------------------------------------------------------
- * Core: Toggle all overlays visibility
- * --------------------------------------------------------------------------
- * Shows or hides all canvas overlays on the page. When hidden, the
- * original images are visible. When shown, the translated text is visible.
- *
- * We do this by toggling the canvas element's display style. We also
- * call the overlay module's restore/render functions if available.
- */
-function toggleAllOverlays() {
-  const canvases = document.querySelectorAll(`.${CLASS_PREFIX}-canvas`);
-
-  for (const canvas of canvases) {
-    if (canvas.style.display === 'none') {
-      canvas.style.display = 'block';
-    } else {
-      canvas.style.display = 'none';
-    }
-  }
 }
 
 /*
@@ -2694,12 +2640,6 @@ function cleanupAll() {
 
   restoreOriginalInlineStyles();
 
-  /* Remove the toolbar */
-  if (toolbarContainer) {
-    toolbarContainer.remove();
-    toolbarContainer = null;
-  }
-
   /* Disconnect the MutationObserver */
   if (pageObserver) {
     pageObserver.disconnect();
@@ -2742,9 +2682,6 @@ async function activate(settings) {
     targetLanguage: currentSettings.targetLanguage || 'en'
   });
 
-  /* Create the floating toolbar */
-  createToolbar();
-
   /* Set up the MutationObserver to catch dynamically loaded images */
   setupMutationObserver();
 
@@ -2760,7 +2697,7 @@ async function activate(settings) {
   }
 }
 
-async function translateCurrentPage(settings, statusMessage = 'Translating all images...') {
+async function translateCurrentPage(settings) {
   const nextSettings = settings || currentSettings || {};
 
   if (!isActive) {
@@ -2770,7 +2707,6 @@ async function translateCurrentPage(settings, statusMessage = 'Translating all i
     addTranslateIcons();
   }
 
-  updateToolbarStatus(statusMessage);
   await processAllImages({ mode: 'render' });
 }
 
@@ -2814,13 +2750,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
      * ACTIVATE: Start scanning and translating images on this page.
      * The payload contains the current settings (target language, etc.)
      */
-    case 'ACTIVATE':
-    case 'TRANSLATE_PAGE': {
+    case 'ACTIVATE': {
       /*
-       * Both ACTIVATE (from background.js toggle) and TRANSLATE_PAGE
-       * (from the popup's "Translate This Page" button) trigger the
-       * same activation flow. The payload may contain settings directly
-       * or nested under payload.settings.
+       * The payload may carry settings directly or nested under
+       * payload.settings.
        */
       const settings = payload?.settings || message.settings || payload;
       activate(settings).then(() => {
@@ -2833,7 +2766,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'TRANSLATE_ALL_IMAGES': {
       translateCurrentPage(currentSettings)
         .then(() => {
-          updateToolbarStatus('Translation complete');
           sendResponse({ success: true });
         })
         .catch((error) => {
