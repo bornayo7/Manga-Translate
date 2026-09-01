@@ -52,6 +52,17 @@ export async function getSettings() {
     const result = await chrome.storage.local.get([SETTINGS_KEY, ...LEGACY_SETTING_KEYS]);
 
     if (result[SETTINGS_KEY] && typeof result[SETTINGS_KEY] === 'object' && !Array.isArray(result[SETTINGS_KEY])) {
+      /*
+       * vt_settings wins, but pre-migration top-level keys can still be
+       * sitting alongside it (migrateLegacySettings only runs when
+       * vt_settings is absent). Clear them once, here, rather than on every
+       * save.
+       */
+      const staleLegacyKeys = LEGACY_SETTING_KEYS.filter((key) => key in result);
+      if (staleLegacyKeys.length > 0) {
+        await chrome.storage.local.remove(staleLegacyKeys);
+      }
+
       return mergeWithDefaults(result[SETTINGS_KEY]);
     }
 
@@ -74,7 +85,6 @@ export async function saveSettings(settings) {
     const current = await getSettings();
     const merged = mergeWithDefaults({ ...current, ...(settings || {}) });
     await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
-    await chrome.storage.local.remove(LEGACY_SETTING_KEYS);
     console.log('[VisionTranslate] Settings saved:', redactSecretsForLog(merged));
     return merged;
   } catch (error) {
