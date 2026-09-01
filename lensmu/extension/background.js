@@ -67,6 +67,7 @@ import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation 
 import { toContentScriptSettings } from './shared/preferences.js';
 import { fetchWithTimeout } from './shared/fetch-with-timeout.js';
 import { readResponseBytesWithLimit } from './shared/response-limits.js';
+import { stripDataUrlPrefix, toErrorMessage } from './shared/text.js';
 
 /*
  * --------------------------------------------------------------------------
@@ -151,15 +152,6 @@ function normalizeOcrEngine(engine) {
     default:
       return 'tesseract';
   }
-}
-
-function stripDataUrlPrefix(imageBase64) {
-  if (!imageBase64 || !imageBase64.startsWith('data:')) {
-    return imageBase64;
-  }
-
-  const commaIndex = imageBase64.indexOf(',');
-  return commaIndex === -1 ? imageBase64 : imageBase64.slice(commaIndex + 1);
 }
 
 function toContentScriptBlocks(blocks = []) {
@@ -250,18 +242,6 @@ function showFatalErrorNotification(errorMessage) {
 const OFFSCREEN_TESSERACT_DOCUMENT_PATH = 'offscreen/ocr.html';
 const OFFSCREEN_TESSERACT_TARGET = 'offscreen-tesseract';
 let offscreenTesseractCreation = null;
-
-function toErrorMessage(error, fallback = 'Unknown error') {
-  if (typeof error === 'string' && error.trim()) {
-    return error;
-  }
-
-  if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) {
-    return error.message;
-  }
-
-  return fallback;
-}
 
 async function hasOffscreenTesseractDocument() {
   const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_TESSERACT_DOCUMENT_PATH);

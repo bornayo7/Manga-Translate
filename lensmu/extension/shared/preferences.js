@@ -78,6 +78,19 @@ export const DEFAULT_SYNCED_PREFERENCES = Object.freeze(
   )
 );
 
+// Coerces a stored value into a numeric range. Settings arrive from
+// chrome.storage and from the sync API, so a key can hold a string, null, or
+// nothing at all; callers want a usable number either way.
+export function clampNumber(value, min, max, fallback) {
+  const numericValue = Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, numericValue));
+}
+
 export function mergeWithDefaults(partial = {}) {
   const source = partial && typeof partial === 'object' && !Array.isArray(partial)
     ? partial
