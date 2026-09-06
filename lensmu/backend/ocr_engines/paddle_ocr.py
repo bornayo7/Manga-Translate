@@ -309,9 +309,19 @@ class PaddleOCREngine:
         for detection in page_result or []:
             polygon = detection[0]
             text_info = detection[1]
-            text = text_info[0]
+            text = str(text_info[0] or "").strip()
+            if not text:
+                continue
+
             confidence = float(text_info[1])
             bbox = cls._polygon_to_bbox(polygon)
+
+            # Match the 3.x path: a box with no area is useless to the
+            # extension, and /ocr/manga rejects the *whole* request (422) if
+            # even one such box is posted back as a crop rectangle.
+            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                continue
+
             orientation = cls._detect_orientation(polygon)
 
             detections.append({
@@ -401,7 +411,7 @@ class PaddleOCREngine:
             box = box.tolist()
 
         if isinstance(box, (list, tuple)) and len(box) == 4 and not isinstance(box[0], (list, tuple)):
-            return [int(round(float(point))) for point in box]
+            return [max(0, int(round(float(point)))) for point in box]
 
         return cls._polygon_to_bbox(box)
 
@@ -437,11 +447,14 @@ class PaddleOCREngine:
         # contains every corner. Truncating with int() pulls both edges toward
         # zero, which shrinks the box on the right/bottom and can clip the last
         # glyph out of the crop that MangaOCR later receives.
+        #
+        # Clamp at zero: a detector polygon can poke slightly past the image
+        # edge, and /ocr/manga rejects negative crop coordinates outright.
         return [
-            math.floor(min(x_coords)),   # x_min (left edge)
-            math.floor(min(y_coords)),   # y_min (top edge)
-            math.ceil(max(x_coords)),    # x_max (right edge)
-            math.ceil(max(y_coords)),    # y_max (bottom edge)
+            max(0, math.floor(min(x_coords))),   # x_min (left edge)
+            max(0, math.floor(min(y_coords))),   # y_min (top edge)
+            max(0, math.ceil(max(x_coords))),    # x_max (right edge)
+            max(0, math.ceil(max(y_coords))),    # y_max (bottom edge)
         ]
 
     @staticmethod

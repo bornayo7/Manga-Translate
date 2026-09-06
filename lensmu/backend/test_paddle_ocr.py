@@ -177,3 +177,26 @@ def test_undecodable_image_raises_value_error(paddle_module):
 
     with pytest.raises(ValueError):
         engine.process_image(b"definitely not an image")
+
+
+def test_legacy_results_drop_blank_text_and_zero_area_boxes(paddle_module):
+    legacy_page = [
+        ([[10.4, 20.6], [50.2, 20.6], [50.2, 40.1], [10.4, 40.1]], ("hello", 0.98765)),
+        ([[5, 5], [5, 5], [5, 5], [5, 5]], ("dot", 0.5)),
+        ([[0, 0], [30, 0], [30, 12], [0, 12]], ("   ", 0.9)),
+        ([[-3.5, 60], [12, 60], [12, 90.2], [-3.5, 90.2]], ("edge", 0.7)),
+    ]
+
+    detections = paddle_module.PaddleOCREngine._normalize_detections([legacy_page])
+
+    assert detections == [
+        {"text": "hello", "bbox": [10, 20, 51, 41], "confidence": 0.9877, "orientation": "horizontal"},
+        {"text": "edge", "bbox": [0, 60, 12, 91], "confidence": 0.7, "orientation": "vertical"},
+    ]
+
+
+def test_normalised_boxes_never_carry_negative_coordinates(paddle_module):
+    engine = paddle_module.PaddleOCREngine
+
+    assert engine._normalize_box([-2.4, -0.6, 10.2, 5.5]) == [0, 0, 10, 6]
+    assert engine._polygon_to_bbox([[-1, -1], [4, -1], [4, 3], [-1, 3]]) == [0, 0, 4, 3]
