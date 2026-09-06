@@ -1,6 +1,8 @@
 // Canonical shared preference definitions used by both the extension and the website.
 // Keep this file free of secrets and free of browser-only or server-only APIs.
 
+import { DEFAULT_LLM_MODELS } from './llm-models.js';
+
 export const PREFERENCE_SCHEMA_VERSION = 2;
 
 // chrome.storage.local key holding the merged settings object.
@@ -21,7 +23,7 @@ export const DEFAULT_EXTENSION_SETTINGS = {
   customApiKey: '',
   customBaseUrl: '',
   customModelName: '',
-  llmModel: 'gemini-2.0-flash',
+  llmModel: DEFAULT_LLM_MODELS.gemini,
   enableReadAloud: false,
   elevenLabsApiKey: '',
   elevenLabsVoiceId: '',

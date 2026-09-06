@@ -12,6 +12,10 @@ import {
   mergeWithDefaults,
 } from "../../shared/preferences.js";
 import { trimTrailingSlashes } from "../../shared/text.js";
+import {
+  DEFAULT_LLM_MODELS,
+  resolveProviderModel,
+} from "../../shared/llm-models.js";
 
 const TAB_ITEMS = [
   { id: "home", label: "Home" },
@@ -35,17 +39,6 @@ const OVERLAY_ALIGNMENT_OPTIONS = [
 
 const MIN_FONT_SIZE_OPTIONS = [8, 10, 12, 14, 16];
 const READ_ALOUD_TEST_TEXT = "This is a VisionTranslate read aloud test.";
-const DEFAULT_PROVIDER_MODELS = {
-  openai: "gpt-4o-mini",
-  claude: "claude-sonnet-4-20250514",
-  gemini: "gemini-2.0-flash",
-};
-
-const PROVIDER_MODEL_PREFIXES = {
-  openai: ["gpt-"],
-  claude: ["claude-"],
-  gemini: ["gemini-"],
-};
 
 function normalizeLoadedSettings(rawSettings = {}) {
   const nextSettings = { ...rawSettings };
@@ -54,13 +47,14 @@ function normalizeLoadedSettings(rawSettings = {}) {
     nextSettings.translationProvider = "libre";
   }
 
+  /*
+   * llmModel is one setting shared by every provider, and providers retire
+   * IDs over time. Resolve to what the request will actually send so the
+   * picker shows the truth and the autosave persists the migration.
+   */
   const provider = nextSettings.translationProvider;
-  const prefixes = PROVIDER_MODEL_PREFIXES[provider];
-  if (
-    prefixes &&
-    !prefixes.some((prefix) => String(nextSettings.llmModel || "").startsWith(prefix))
-  ) {
-    nextSettings.llmModel = DEFAULT_PROVIDER_MODELS[provider];
+  if (DEFAULT_LLM_MODELS[provider]) {
+    nextSettings.llmModel = resolveProviderModel(provider, nextSettings.llmModel);
   }
 
   return nextSettings;
@@ -418,7 +412,7 @@ export default function App() {
     setSettings((previous) => ({
       ...previous,
       translationProvider: provider,
-      llmModel: DEFAULT_PROVIDER_MODELS[provider] || previous.llmModel,
+      llmModel: DEFAULT_LLM_MODELS[provider] || previous.llmModel,
     }));
   };
 

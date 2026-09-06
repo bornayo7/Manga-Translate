@@ -1,6 +1,7 @@
 import React from "react";
 import ApiKeyInput from "./ApiKeyInput.jsx";
 import RichSelect from "./RichSelect.jsx";
+import { LLM_MODEL_OPTIONS } from "../../../shared/llm-models.js";
 
 export const PROVIDER_OPTIONS = [
   {
@@ -50,27 +51,6 @@ export const PROVIDER_OPTIONS = [
   },
 ];
 
-const MODEL_OPTIONS = {
-  openai: [
-    { id: "gpt-4o", name: "GPT-4o" },
-    { id: "gpt-4o-mini", name: "GPT-4o Mini" },
-    { id: "gpt-4", name: "GPT-4" },
-    { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" },
-  ],
-  claude: [
-    { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
-    { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
-    { id: "claude-3-opus-20240229", name: "Claude 3 Opus" },
-    { id: "claude-3-haiku-20240307", name: "Claude 3 Haiku" },
-  ],
-  gemini: [
-    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-    { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash" },
-    { id: "gemini-2.5-pro-preview-06-05", name: "Gemini 2.5 Pro" },
-    { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
-  ],
-};
-
 export default function TranslateSettings({
   provider,
   onProviderChange,
@@ -92,7 +72,8 @@ export default function TranslateSettings({
   onAllowThirdPartyFallbackChange,
 }) {
   const selectedProvider = PROVIDER_OPTIONS.find((option) => option.id === provider);
-  const models = MODEL_OPTIONS[provider] || [];
+  const models = LLM_MODEL_OPTIONS[provider] || [];
+  const storedModelIsListed = models.some((model) => model.id === llmModel);
 
   return (
     <div className="choice-section">
@@ -207,6 +188,15 @@ export default function TranslateSettings({
               value={llmModel}
               onChange={(event) => onLlmModelChange(event.target.value)}
             >
+              {!storedModelIsListed && llmModel ? (
+                /*
+                 * A controlled <select> silently shows its first option when
+                 * the value is not in the list, while the request keeps
+                 * using the stored ID. Show the stored ID so what you see
+                 * is what gets sent.
+                 */
+                <option value={llmModel}>{llmModel}</option>
+              ) : null}
               {models.map((model) => (
                 <option key={model.id} value={model.id}>
                   {model.name}
