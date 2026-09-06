@@ -1,0 +1,179 @@
+# =============================================================================
+# VisionTranslate — PaddleOCR wrapper tests
+# =============================================================================
+#
+# Run with: pytest -v
+#
+# The real `paddleocr` package is a multi-hundred-megabyte optional dependency
+# that CI does not install. These tests stand in a tiny stub for it so the
+# wrapper's caching, locking, and result-normalisation logic can still be
+# exercised deterministically.
+# =============================================================================
+
+import importlib
+import io
+import sys
+import threading
+import time
+import types
+
+import pytest
+from PIL import Image
+
+
+def make_png(width: int = 4, height: int = 4) -> bytes:
+    """Return a small, genuinely decodable PNG for process_image() tests."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (255, 255, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+TINY_PNG = make_png()
+
+
+class FakePaddleOCR:
+    """Minimal stand-in for paddleocr.PaddleOCR (3.x constructor names)."""
+
+    instances: list = []
+    init_delay = 0.0
+    predict_result: list = []
+
+    def __init__(
+        self,
+        lang="japan",
+        use_textline_orientation=False,
+        text_det_thresh=0.3,
+        text_det_unclip_ratio=1.5,
+    ):
+        self.kwargs = {
+            "lang": lang,
+            "use_textline_orientation": use_textline_orientation,
+            "text_det_thresh": text_det_thresh,
+            "text_det_unclip_ratio": text_det_unclip_ratio,
+        }
+        time.sleep(type(self).init_delay)
+        type(self).instances.append(self)
+
+    def predict(self, image_array):
+        return type(self).predict_result
+
+
+@pytest.fixture
+def paddle_module(monkeypatch):
+    """Import ocr_engines.paddle_ocr against the stub paddleocr package."""
+    FakePaddleOCR.instances = []
+    FakePaddleOCR.init_delay = 0.0
+    FakePaddleOCR.predict_result = []
+
+    fake_package = types.ModuleType("paddleocr")
+    fake_package.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_package)
+    sys.modules.pop("ocr_engines.paddle_ocr", None)
+
+    module = importlib.import_module("ocr_engines.paddle_ocr")
+    module.PaddleOCREngine._instances.clear()
+    yield module
+
+    module.PaddleOCREngine._instances.clear()
+    sys.modules.pop("ocr_engines.paddle_ocr", None)
+
+
+def test_constructor_uses_3x_argument_names(paddle_module):
+    paddle_module.PaddleOCREngine.get_instance("japan")
+
+    assert FakePaddleOCR.instances[0].kwargs == {
+        "lang": "japan",
+        "use_textline_orientation": True,
+        "text_det_thresh": 0.3,
+        "text_det_unclip_ratio": 1.8,
+    }
+
+
+def test_instances_are_cached_per_language_and_evicted_lru(paddle_module):
+    engine = paddle_module.PaddleOCREngine
+
+    first = engine.get_instance("japan")
+    assert engine.get_instance("JAPAN ") is first
+    assert len(FakePaddleOCR.instances) == 1
+
+    engine.get_instance("en")
+    engine.get_instance("korean")
+
+    assert engine.get_loaded_languages() == ["en", "korean"]
+    assert len(FakePaddleOCR.instances) == 3
+
+    # Touching a cached language marks it recently used, so the *other*
+    # language is the one evicted next.
+    engine.get_instance("en")
+    engine.get_instance("ch")
+    assert engine.get_loaded_languages() == ["en", "ch"]
+
+
+def test_loaded_language_lookup_does_not_wait_for_a_model_load(paddle_module):
+    engine = paddle_module.PaddleOCREngine
+    FakePaddleOCR.init_delay = 1.0
+
+    loader = threading.Thread(target=engine.get_instance, args=("japan",))
+    loader.start()
+    time.sleep(0.1)
+
+    started = time.perf_counter()
+    languages_during_load = engine.get_loaded_languages()
+    waited = time.perf_counter() - started
+
+    loader.join()
+
+    assert languages_during_load == []
+    assert waited < 0.5, f"/health-style lookup blocked for {waited:.2f}s during model load"
+    assert engine.get_loaded_languages() == ["japan"]
+
+
+def test_concurrent_requests_build_one_model(paddle_module):
+    engine = paddle_module.PaddleOCREngine
+    FakePaddleOCR.init_delay = 0.2
+
+    threads = [threading.Thread(target=engine.get_instance, args=("japan",)) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(FakePaddleOCR.instances) == 1
+
+
+def test_modern_results_are_normalised_filtered_and_sorted(paddle_module):
+    FakePaddleOCR.predict_result = [
+        {
+            "rec_texts": ["second", "   ", "first", "tall", "zero"],
+            "rec_scores": [0.91, 0.5, 0.87123, 0.7, 0.9],
+            "rec_boxes": [
+                [10, 50, 60, 70],
+                [0, 0, 5, 5],
+                [10, 10, 60, 30],
+                [80, 10, 90, 60],
+                [0, 0, 5, 0],
+            ],
+            "rec_polys": [
+                [[10, 50], [60, 50], [60, 70], [10, 70]],
+                [[0, 0], [5, 0], [5, 5], [0, 5]],
+                [[10, 10], [60, 10], [60, 30], [10, 30]],
+                [[80, 10], [90, 10], [90, 60], [80, 60]],
+                [[0, 0], [5, 0], [5, 0], [0, 0]],
+            ],
+        }
+    ]
+
+    detections = paddle_module.PaddleOCREngine.get_instance("en").process_image(TINY_PNG)
+
+    assert detections == [
+        {"text": "first", "bbox": [10, 10, 60, 30], "confidence": 0.8712, "orientation": "horizontal"},
+        {"text": "tall", "bbox": [80, 10, 90, 60], "confidence": 0.7, "orientation": "vertical"},
+        {"text": "second", "bbox": [10, 50, 60, 70], "confidence": 0.91, "orientation": "horizontal"},
+    ]
+
+
+def test_undecodable_image_raises_value_error(paddle_module):
+    engine = paddle_module.PaddleOCREngine.get_instance("en")
+
+    with pytest.raises(ValueError):
+        engine.process_image(b"definitely not an image")

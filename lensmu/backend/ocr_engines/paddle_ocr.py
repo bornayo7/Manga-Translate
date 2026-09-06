@@ -75,11 +75,16 @@ class PaddleOCREngine:
     # --- Singleton machinery ---------------------------------------------------
     # _instances is an LRU of one engine per language, capped at
     # _max_cached_languages because each loaded model costs real memory.
-    # _lock prevents two threads from creating an instance simultaneously
-    # (this can happen if two HTTP requests arrive at the same time before
-    # the model is loaded).
+    #
+    # Two locks on purpose:
+    #   - _lock guards the cache map and is only ever held for a moment.
+    #   - _load_lock serialises model construction, which takes several
+    #     seconds. Keeping it separate means readers such as
+    #     get_loaded_languages() (and therefore /health, which runs on the
+    #     event loop) never wait behind a model load.
     _instances: "OrderedDict[str, PaddleOCREngine]" = OrderedDict()
     _lock: threading.Lock = threading.Lock()
+    _load_lock: threading.Lock = threading.Lock()
     _max_cached_languages = 2
 
     def __init__(self, language: str = "japan") -> None:
@@ -113,16 +118,29 @@ class PaddleOCREngine:
     @classmethod
     def get_instance(cls, language: str = "japan") -> "PaddleOCREngine":
         """
-        Return the singleton PaddleOCREngine instance, creating it on first call.
+        Return the cached PaddleOCREngine for a language, creating it on first call.
 
-        Thread-safe: uses a lock so that if two requests arrive simultaneously
-        before the model is loaded, only one will create the instance.
+        Thread-safe: construction is serialised so that if two requests arrive
+        simultaneously before the model is loaded, only one will create the
+        instance. The cache lock is *not* held while the model loads, so
+        get_loaded_languages() stays responsive during initialisation.
         """
         normalized_language = str(language or "japan").strip().lower()
-        with cls._lock:
-            instance = cls._instances.get(normalized_language)
-            if instance is None:
-                instance = cls(normalized_language)
+
+        instance = cls._get_cached(normalized_language)
+        if instance is not None:
+            return instance
+
+        with cls._load_lock:
+            # Another request may have finished loading this language while
+            # we waited for the load lock.
+            instance = cls._get_cached(normalized_language)
+            if instance is not None:
+                return instance
+
+            instance = cls(normalized_language)
+
+            with cls._lock:
                 cls._instances[normalized_language] = instance
                 while len(cls._instances) > cls._max_cached_languages:
                     evicted_language, _ = cls._instances.popitem(last=False)
@@ -130,9 +148,16 @@ class PaddleOCREngine:
                         "Evicted cached PaddleOCR language '%s' to limit model memory.",
                         evicted_language,
                     )
-            else:
-                cls._instances.move_to_end(normalized_language)
 
+            return instance
+
+    @classmethod
+    def _get_cached(cls, language: str) -> "PaddleOCREngine | None":
+        """Return the cached engine for a language (marking it recently used)."""
+        with cls._lock:
+            instance = cls._instances.get(language)
+            if instance is not None:
+                cls._instances.move_to_end(language)
             return instance
 
     @classmethod
