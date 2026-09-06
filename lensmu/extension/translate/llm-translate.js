@@ -411,19 +411,57 @@ async function callGemini(userMessage, apiKey, model, maxOutputTokens) {
   }
 
   const data = await response.json();
+  return parseGeminiResponse(data);
+}
 
-  /*
-   * Gemini response format:
-   * {
-   *   "candidates": [{
-   *     "content": {
-   *       "parts": [{ "text": "[1] Hello\n[2] Goodbye" }]
-   *     }
-   *   }]
-   * }
-   */
-  warnIfTruncated('Gemini', data.candidates?.[0]?.finishReason === 'MAX_TOKENS');
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+/*
+ * Gemini response format:
+ * {
+ *   "candidates": [{
+ *     "content": { "parts": [{ "text": "[1] Hello\n[2] Goodbye" }] },
+ *     "finishReason": "STOP"
+ *   }],
+ *   "promptFeedback": { "blockReason": "SAFETY" }   // only when refused
+ * }
+ *
+ * Manga dialogue trips Gemini's safety filters more often than most text.
+ * A refused prompt or a candidate stopped for SAFETY/RECITATION used to
+ * come back as an empty string, which the content script reported as
+ * "provider returned no translated text" - true, but it hid the cause and
+ * the fix (another model, or another provider). Thinking parts are
+ * skipped, and every text part is joined rather than just the first.
+ */
+export function parseGeminiResponse(data) {
+  const blockReason = data?.promptFeedback?.blockReason;
+  if (blockReason) {
+    throw new Error(
+      `Gemini refused the request (${blockReason}). Try another Gemini model or a different provider.`
+    );
+  }
+
+  const candidate = data?.candidates?.[0];
+  if (!candidate) {
+    throw new Error('Gemini returned no candidates.');
+  }
+
+  const text = (candidate.content?.parts || [])
+    .filter((part) => typeof part?.text === 'string' && !part.thought)
+    .map((part) => part.text)
+    .join('');
+  const finishReason = candidate.finishReason || 'STOP';
+
+  if (!text && finishReason === 'MAX_TOKENS') {
+    throw new Error('Gemini hit its output limit before producing a translation. Try a Flash model.');
+  }
+
+  if (!text && finishReason !== 'STOP') {
+    throw new Error(
+      `Gemini stopped without a translation (${finishReason}). Try another Gemini model or a different provider.`
+    );
+  }
+
+  warnIfTruncated('Gemini', finishReason === 'MAX_TOKENS');
+  return text;
 }
 
 /**
