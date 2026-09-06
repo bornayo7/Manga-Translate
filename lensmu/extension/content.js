@@ -747,6 +747,20 @@ function imageToBase64(imageElement) {
     tempCanvas.height = height;
 
     /*
+     * Very large images are exported as JPEG (0.85 quality) to keep the
+     * payload sent to the OCR engine small. JPEG has no alpha channel and
+     * toDataURL() composites transparent pixels onto BLACK, so a
+     * transparent PNG with dark text came out black-on-black and OCR found
+     * nothing. Paint a white background first whenever JPEG is the target;
+     * the PNG path keeps the alpha channel untouched.
+     */
+    const useJpeg = width * height > 2000000;
+    if (useJpeg) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+    }
+
+    /*
      * Draw the image onto our temporary canvas. This copies the pixel
      * data. If the image is from a different origin and the server
      * didn't set appropriate CORS headers, this will "taint" the canvas,
@@ -755,15 +769,11 @@ function imageToBase64(imageElement) {
     ctx.drawImage(imageElement, 0, 0, width, height);
 
     /*
-     * Export as PNG data URL. PNG is lossless so we don't degrade the
-     * image quality. The result is a string like:
+     * Export as a data URL. PNG is lossless so we don't degrade the image
+     * quality. The result is a string like:
      * "data:image/png;base64,iVBORw0KGgo..."
-     *
-     * For very large images, we use JPEG with 0.85 quality to reduce
-     * the payload size sent to the OCR backend.
      */
-    if (width * height > 2000000) {
-      /* Images over 2 megapixels: use JPEG to save bandwidth */
+    if (useJpeg) {
       return tempCanvas.toDataURL('image/jpeg', 0.85);
     }
 
