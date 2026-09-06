@@ -83,3 +83,39 @@ export function describeHttpFailure(status, statusText, body) {
 
   return fallback;
 }
+
+// The backend's /ocr/manga validator rejects the *whole* request if any box
+// is malformed, so mirror its rules here and only post boxes it will accept.
+export const MAX_MANGA_REGIONS = 200;
+export const MAX_MANGA_COORDINATE = 100000;
+export const MAX_MANGA_TOTAL_REGION_PIXELS = 50000000;
+
+export function selectMangaBboxes(detections = []) {
+  const accepted = [];
+  let totalArea = 0;
+
+  for (const detection of detections) {
+    const bbox = Array.isArray(detection?.bbox) ? detection.bbox : null;
+    if (!bbox || bbox.length !== 4) {
+      continue;
+    }
+
+    const [x1, y1, x2, y2] = bbox.map((value) => Math.round(Number(value)));
+    const inRange = [x1, y1, x2, y2].every(
+      (value) => Number.isInteger(value) && value >= 0 && value <= MAX_MANGA_COORDINATE
+    );
+    if (!inRange || x2 <= x1 || y2 <= y1) {
+      continue;
+    }
+
+    const area = (x2 - x1) * (y2 - y1);
+    if (accepted.length >= MAX_MANGA_REGIONS || totalArea + area > MAX_MANGA_TOTAL_REGION_PIXELS) {
+      break;
+    }
+
+    totalArea += area;
+    accepted.push([x1, y1, x2, y2]);
+  }
+
+  return accepted;
+}
