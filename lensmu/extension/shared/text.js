@@ -152,3 +152,11 @@ export function toContentScriptBlocks(
     })
     .filter((block) => block.text.trim().length > 0);
 }
+
+// Base URLs come from settings the user typed. "http://localhost:8000/" is
+// the natural thing to paste, but `${base}/ocr/paddle` then becomes
+// ".../8000//ocr/paddle", which FastAPI answers with 404 - so every consumer
+// normalises through here first.
+export function trimTrailingSlashes(url) {
+  return String(url || '').trim().replace(/\/+$/, '');
+}

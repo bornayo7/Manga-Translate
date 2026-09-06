@@ -72,7 +72,8 @@ import {
   selectMangaBboxes,
   stripDataUrlPrefix,
   toContentScriptBlocks,
-  toErrorMessage
+  toErrorMessage,
+  trimTrailingSlashes
 } from './shared/text.js';
 
 /*
@@ -709,7 +710,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'OCR_REQUEST': {
         const settings = await getSettings();
         const engine = normalizeOcrEngine(settings.ocrEngine);
-        const backendUrl = settings.backendUrl || 'http://localhost:8000';
+        const backendUrl = trimTrailingSlashes(settings.backendUrl) || 'http://localhost:8000';
         const rawImage = stripDataUrlPrefix(payload.imageBase64);
 
         try {
