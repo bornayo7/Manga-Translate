@@ -24,7 +24,6 @@
   "permissions": [
     "activeTab",
     "storage",
-    "scripting",
     "offscreen",
     "notifications",
     "identity"
@@ -78,9 +77,7 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "icons/*",
         "overlay.js",
-        "utils/*",
         "lib/*",
         "ocr/*"
       ],
