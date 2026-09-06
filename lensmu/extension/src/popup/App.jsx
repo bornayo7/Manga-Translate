@@ -8,6 +8,7 @@ import ReadAloudSettings from "./components/ReadAloudSettings.jsx";
 import {
   DEFAULT_EXTENSION_SETTINGS,
   SETTINGS_STORAGE_KEY,
+  clampNumber,
   mergeWithDefaults,
 } from "../../shared/preferences.js";
 import { trimTrailingSlashes } from "../../shared/text.js";
@@ -161,6 +162,82 @@ function ToggleRow({
       >
         <span className="toggle-thumb" />
       </button>
+    </div>
+  );
+}
+
+/*
+ * A number input that only commits complete, in-range values.
+ *
+ * Binding <input type="number"> straight to settings meant that clearing
+ * the field to retype it stored Number("") === 0, the 180 ms autosave
+ * shipped that 0 to every active tab, and content.js promptly decorated
+ * every 1px tracking pixel on the page with a translate icon - icons that
+ * stayed once the real value was typed. Now the draft lives here until it
+ * parses inside [min, max]; on blur it is clamped, and an empty field
+ * simply reverts.
+ */
+function NumberField({ id, label, value, min, max, onCommit }) {
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraft(String(value));
+    }
+  }, [value, editing]);
+
+  function parseDraft(rawValue) {
+    const parsed = Number(rawValue);
+    return rawValue.trim() !== "" && Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function handleChange(event) {
+    const next = event.target.value;
+    setDraft(next);
+
+    const parsed = parseDraft(next);
+    if (parsed !== null && parsed >= min && parsed <= max) {
+      onCommit(Math.round(parsed));
+    }
+  }
+
+  function handleBlur() {
+    const parsed = parseDraft(draft);
+    setEditing(false);
+
+    if (parsed === null) {
+      setDraft(String(value));
+      return;
+    }
+
+    const committed = Math.round(clampNumber(parsed, min, max, value));
+    setDraft(String(committed));
+    onCommit(committed);
+  }
+
+  return (
+    <div className="form-group">
+      <label className="form-label" htmlFor={id}>
+        {label}
+      </label>
+      <input
+        id={id}
+        className="form-input"
+        type="number"
+        min={min}
+        max={max}
+        step="1"
+        value={draft}
+        onFocus={() => setEditing(true)}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+        }}
+      />
     </div>
   );
 }
@@ -955,56 +1032,32 @@ export default function App() {
               <div className="card-divider" />
 
               <div className="field-grid field-grid--triple">
-                <div className="form-group">
-                  <label className="form-label" htmlFor="min-image-width">
-                    Minimum width
-                  </label>
-                  <input
-                    id="min-image-width"
-                    className="form-input"
-                    type="number"
-                    min="32"
-                    max="4096"
-                    value={settings.minImageWidth}
-                    onChange={(event) =>
-                      updateSetting("minImageWidth", Number(event.target.value))
-                    }
-                  />
-                </div>
+                <NumberField
+                  id="min-image-width"
+                  label="Minimum width"
+                  min={32}
+                  max={4096}
+                  value={settings.minImageWidth}
+                  onCommit={(value) => updateSetting("minImageWidth", value)}
+                />
 
-                <div className="form-group">
-                  <label className="form-label" htmlFor="min-image-height">
-                    Minimum height
-                  </label>
-                  <input
-                    id="min-image-height"
-                    className="form-input"
-                    type="number"
-                    min="32"
-                    max="4096"
-                    value={settings.minImageHeight}
-                    onChange={(event) =>
-                      updateSetting("minImageHeight", Number(event.target.value))
-                    }
-                  />
-                </div>
+                <NumberField
+                  id="min-image-height"
+                  label="Minimum height"
+                  min={32}
+                  max={4096}
+                  value={settings.minImageHeight}
+                  onCommit={(value) => updateSetting("minImageHeight", value)}
+                />
 
-                <div className="form-group">
-                  <label className="form-label" htmlFor="max-concurrent-images">
-                    Parallel images
-                  </label>
-                  <input
-                    id="max-concurrent-images"
-                    className="form-input"
-                    type="number"
-                    min="1"
-                    max="12"
-                    value={settings.maxConcurrentImages}
-                    onChange={(event) =>
-                      updateSetting("maxConcurrentImages", Number(event.target.value))
-                    }
-                  />
-                </div>
+                <NumberField
+                  id="max-concurrent-images"
+                  label="Parallel images"
+                  min={1}
+                  max={12}
+                  value={settings.maxConcurrentImages}
+                  onCommit={(value) => updateSetting("maxConcurrentImages", value)}
+                />
               </div>
             </section>
 
