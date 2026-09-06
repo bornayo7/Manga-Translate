@@ -616,7 +616,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
             action: 'ACTIVATE',
             payload: { settings: toContentScriptSettings(settings) }
           });
-          if (response !== null) {
+          if (response?.success === true) {
             state.active = true;
             await updateBadge(tabId);
             await persistTabStates();
@@ -1372,10 +1372,13 @@ async function toggleTranslation(tabId) {
     /*
      * If the content script didn't respond (null), it might not be
      * injected. This happens on pages where content scripts aren't
-     * allowed (chrome:// URLs, the Chrome Web Store, etc.).
+     * allowed (chrome:// URLs, the Chrome Web Store, etc.). A response
+     * without success means it is there but activation itself failed.
      */
-    if (response === null) {
-      console.warn(`[VisionTranslate] Content script not available on tab ${tabId}. Reverting state.`);
+    if (response?.success !== true) {
+      console.warn(
+        `[VisionTranslate] Could not activate on tab ${tabId} (${response?.error || 'content script not available'}). Reverting state.`
+      );
       state.active = false;
     } else {
       state.active = true;
