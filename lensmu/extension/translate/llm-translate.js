@@ -104,6 +104,35 @@ Response example:
 [2] How are you doing?
 [3] BOOM (ドーン)`;
 
+/*
+ * Output budget for one request. A fixed 2000 tokens topped out around 30
+ * short bubbles and silently truncated denser pages (the missing blocks
+ * simply rendered untranslated). Estimate from the input instead:
+ * translations run up to ~2x the source length, each numbered line costs a
+ * few tokens of framing, and current models may spend part of the budget
+ * on thinking. Bounded so a runaway estimate stays under every provider's
+ * output limit.
+ */
+const MIN_OUTPUT_TOKENS = 1024;
+const MAX_OUTPUT_TOKENS = 8192;
+
+export function estimateOutputTokens(texts) {
+  const inputChars = (Array.isArray(texts) ? texts : []).reduce(
+    (total, text) => total + String(text || '').length,
+    0
+  );
+  const estimate = Math.ceil(inputChars * 1.5) + (Array.isArray(texts) ? texts.length : 0) * 16 + 200;
+  return Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, estimate));
+}
+
+function warnIfTruncated(providerName, truncated) {
+  if (truncated) {
+    console.warn(
+      `[VisionTranslate] ${providerName} hit its output limit; the last text blocks may be missing their translation.`
+    );
+  }
+}
+
 /**
  * Translate text blocks using an LLM (OpenAI or Claude).
  *
@@ -141,15 +170,16 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
    * Route to the appropriate API based on provider.
    */
   let responseText;
+  const maxOutputTokens = estimateOutputTokens(texts);
 
   if (provider === 'openai') {
-    responseText = await callOpenAI(userMessage, apiKey, model);
+    responseText = await callOpenAI(userMessage, apiKey, model, maxOutputTokens);
   } else if (provider === 'claude') {
-    responseText = await callClaude(userMessage, apiKey, model);
+    responseText = await callClaude(userMessage, apiKey, model, maxOutputTokens);
   } else if (provider === 'gemini') {
-    responseText = await callGemini(userMessage, apiKey, model);
+    responseText = await callGemini(userMessage, apiKey, model, maxOutputTokens);
   } else if (provider === 'custom') {
-    responseText = await callCustom(userMessage, apiKey, model, baseUrl);
+    responseText = await callCustom(userMessage, apiKey, model, baseUrl, maxOutputTokens);
   } else {
     throw new Error(`Unknown LLM provider: ${provider}`);
   }
@@ -183,7 +213,7 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
  * @param {string} model       — Model ID (e.g., "gpt-4o-mini")
  * @returns {Promise<string>}  — The model's response text
  */
-async function callOpenAI(userMessage, apiKey, model) {
+async function callOpenAI(userMessage, apiKey, model, maxOutputTokens) {
   const requestBody = {
     model: model,
     messages: [
@@ -198,11 +228,10 @@ async function callOpenAI(userMessage, apiKey, model) {
     ],
     /*
      * max_completion_tokens limits response length; the older max_tokens
-     * name is rejected by the gpt-5 family. We set a generous limit since
-     * translations can be longer than the original (especially JP→EN).
-     * 2000 tokens is enough for ~30-40 text blocks.
+     * name is rejected by the gpt-5 family. The budget is sized to the
+     * request (see estimateOutputTokens).
      */
-    max_completion_tokens: 2000
+    max_completion_tokens: maxOutputTokens
   };
 
   /*
@@ -248,6 +277,7 @@ async function callOpenAI(userMessage, apiKey, model) {
    *   }]
    * }
    */
+  warnIfTruncated('OpenAI', data.choices?.[0]?.finish_reason === 'length');
   return data.choices?.[0]?.message?.content || '';
 }
 
@@ -261,7 +291,7 @@ async function callOpenAI(userMessage, apiKey, model) {
  * @param {string} model       — Model ID (e.g., "claude-sonnet-4-20250514")
  * @returns {Promise<string>}  — The model's response text
  */
-async function callClaude(userMessage, apiKey, model) {
+async function callClaude(userMessage, apiKey, model, maxOutputTokens) {
   const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -285,7 +315,7 @@ async function callClaude(userMessage, apiKey, model) {
     },
     body: JSON.stringify({
       model: model,
-      max_tokens: 2000,
+      max_tokens: maxOutputTokens,
       /*
        * Claude's API uses "system" as a top-level field, not as a
        * message role. This is different from OpenAI's format.
@@ -321,6 +351,7 @@ async function callClaude(userMessage, apiKey, model) {
    * Current models may put a "thinking" block first, so take every text
    * block rather than assuming content[0] is the answer.
    */
+  warnIfTruncated('Claude', data.stop_reason === 'max_tokens');
   return extractClaudeText(data);
 }
 
@@ -342,7 +373,7 @@ export function extractClaudeText(data) {
  * @param {string} model       — Model ID (e.g., "gemini-2.0-flash", "gemini-2.5-pro-preview-06-05")
  * @returns {Promise<string>}  — The model's response text
  */
-async function callGemini(userMessage, apiKey, model) {
+async function callGemini(userMessage, apiKey, model, maxOutputTokens) {
   /*
    * Gemini uses a REST API where the model name is part of the URL.
    * The API key is passed as a query parameter.
@@ -366,7 +397,7 @@ async function callGemini(userMessage, apiKey, model) {
         }],
         generationConfig: {
           temperature: 0.3,
-          maxOutputTokens: 2000
+          maxOutputTokens
         }
       })
     }
@@ -391,6 +422,7 @@ async function callGemini(userMessage, apiKey, model) {
    *   }]
    * }
    */
+  warnIfTruncated('Gemini', data.candidates?.[0]?.finishReason === 'MAX_TOKENS');
   return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
@@ -407,7 +439,7 @@ async function callGemini(userMessage, apiKey, model) {
  * @param {string} baseUrl     — Base URL of the API (e.g., "http://localhost:11434/v1")
  * @returns {Promise<string>}  — The model's response text
  */
-async function callCustom(userMessage, apiKey, model, baseUrl) {
+async function callCustom(userMessage, apiKey, model, baseUrl, maxOutputTokens) {
   const url = `${trimTrailingSlashes(baseUrl)}/chat/completions`;
 
   const headers = {
@@ -433,7 +465,11 @@ async function callCustom(userMessage, apiKey, model, baseUrl) {
         }
       ],
       temperature: 0.3,
-      max_tokens: 2000
+      /*
+       * Local and third-party OpenAI-compatible servers (Ollama, LM Studio,
+       * vLLM, ...) all understand max_tokens; not all know the newer name.
+       */
+      max_tokens: maxOutputTokens
     })
   });
 
@@ -445,6 +481,7 @@ async function callCustom(userMessage, apiKey, model, baseUrl) {
   }
 
   const data = await response.json();
+  warnIfTruncated('The custom API', data.choices?.[0]?.finish_reason === 'length');
   return data.choices?.[0]?.message?.content || '';
 }
 
