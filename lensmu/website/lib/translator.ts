@@ -106,9 +106,22 @@ function ensureTranslatedText(
   originalText: string,
   providerName: string
 ): string {
-  const cleaned = String(rawTranslatedText ?? "")
-    .replace(/MYMEMORY WARNING:.*$/i, "")
-    .trim();
+  // MyMemory reports quota trouble inside translatedText, either appended to
+  // a real translation or as the whole payload once the daily limit is gone.
+  const raw = String(rawTranslatedText ?? "").trim();
+  const warningIndex = raw.search(/MYMEMORY WARNING:/i);
+  const cleaned = (warningIndex === -1 ? raw : raw.slice(0, warningIndex)).trim();
+
+  if (warningIndex !== -1) {
+    const detail = raw.slice(warningIndex).replace(/^MYMEMORY WARNING:\s*/i, "").trim();
+    const readable = detail ? detail.charAt(0) + detail.slice(1).toLowerCase() : "daily quota reached.";
+
+    if (!cleaned) {
+      throw new Error(`${providerName} quota: ${readable}`);
+    }
+
+    console.warn(`[VisionTranslate Website] ${providerName} warning: ${readable}`);
+  }
 
   if (!cleaned) {
     throw new Error(`${providerName} returned an empty translatedText payload.`);
@@ -404,9 +417,10 @@ async function translateOne(
     throw new Error(`MyMemory ${response.status} ${response.statusText}`);
   }
   const data = await response.json();
-  if (data?.responseStatus && data.responseStatus !== 200) {
+  const responseStatus = Number(data?.responseStatus ?? 200);
+  if (Number.isFinite(responseStatus) && responseStatus !== 200) {
     throw new Error(
-      `MyMemory error ${data.responseStatus}: ${data.responseDetails ?? "unknown"}`
+      `MyMemory error ${responseStatus}: ${data.responseDetails ?? "unknown"}`
     );
   }
   return ensureTranslatedText(

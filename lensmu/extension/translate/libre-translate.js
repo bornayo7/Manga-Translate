@@ -53,10 +53,29 @@ const MYMEMORY_CHAR_LIMIT = 500;
  */
 const REQUEST_DELAY_MS = 100;
 
-function ensureTranslatedText(rawTranslatedText, originalText, providerName) {
-  const cleaned = String(rawTranslatedText || '')
-    .replace(/MYMEMORY WARNING:.*$/i, '')
-    .trim();
+/*
+ * MyMemory signals quota trouble inside translatedText: either appended to a
+ * real translation as the daily limit approaches, or as the *entire* payload
+ * ("MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY.
+ * NEXT AVAILABLE IN 16 HOURS ...") once it is exhausted. Stripping the
+ * warning and then complaining about an "empty translatedText payload" hid
+ * the one message the user actually needed.
+ */
+export function ensureTranslatedText(rawTranslatedText, originalText, providerName) {
+  const raw = String(rawTranslatedText || '').trim();
+  const warningIndex = raw.search(/MYMEMORY WARNING:/i);
+  const cleaned = (warningIndex === -1 ? raw : raw.slice(0, warningIndex)).trim();
+
+  if (warningIndex !== -1) {
+    const detail = raw.slice(warningIndex).replace(/^MYMEMORY WARNING:\s*/i, '').trim();
+    const readable = detail ? detail.charAt(0) + detail.slice(1).toLowerCase() : 'daily quota reached.';
+
+    if (!cleaned) {
+      throw new Error(`${providerName} quota: ${readable}`);
+    }
+
+    console.warn(`[VisionTranslate Translation] ${providerName} warning: ${readable}`);
+  }
 
   if (!cleaned) {
     throw new Error(`${providerName} returned an empty translatedText payload.`);
@@ -206,9 +225,16 @@ async function myMemorySingleRequest(text, sourceLang, targetLang) {
    *   403 — Daily limit exceeded
    *   429 — Too many requests
    */
-  if (data.responseStatus && data.responseStatus !== 200) {
+  const responseStatus = Number(data?.responseStatus ?? 200);
+  if (Number.isFinite(responseStatus) && responseStatus !== 200) {
     throw new Error(
-      `MyMemory error (${data.responseStatus}): ${data.responseDetails || 'Unknown error'}`
+      `MyMemory error (${responseStatus}): ${data.responseDetails || 'Unknown error'}`
+    );
+  }
+
+  if (data?.quotaFinished === true && !String(data?.responseData?.translatedText || '').trim()) {
+    throw new Error(
+      'MyMemory daily quota reached (5,000 characters per day without a key). Try again tomorrow or configure an LLM provider.'
     );
   }
 
