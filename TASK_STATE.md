@@ -43,6 +43,20 @@ truncating instead of containing. Swept duplicated helpers into
 and 66 lines of dead popup CSS. See `AUDIT.md` for the full table, including
 what was deliberately left open.
 
+### F. Review pass 2026-09-06
+Third full read, suites green on entry. 29 one-finding commits on
+`review/2026-09-06-bug-sweep`: the backend froze every request (including
+`/health`) for the whole first PaddleOCR model load; the default LLM model
+and most of the Claude/Gemini picker were shut down or retired upstream
+(now `shared/llm-models.js`, checked against the providers' model pages);
+backend error text never reached the user; MangaOCR requests failed whole
+on one bad box; a trailing slash in the backend URL 404ed everything; a
+cleared number field flooded pages with translate icons; the LLM response
+parser shifted translations onto the wrong bubbles; Gemini refusals and
+MyMemory quota exhaustion were reported as "no translated text"; plus a
+dozen smaller fixes and a documentation sweep. Backend tests 29 → 45,
+extension tests 16 → 48. Full table in `AUDIT.md`.
+
 ## Success criteria
 
 1. Keep extension tests/build, website lint/typecheck/build, and backend tests green in CI.

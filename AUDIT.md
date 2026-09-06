@@ -3,6 +3,78 @@
 Branch: `audit/deep-repair` (from `main` @ `48955f8` "Overhaul").
 Status legend for findings: **open** / **fixed** / **deferred** / **won't-fix**.
 
+## Review pass — 2026-09-06
+
+Third full read of the tree, with every suite run first (all green on entry:
+extension 16/16 + build, backend 29, website lint/typecheck/build). This
+pass hunted for defects the earlier tables had not recorded and checked the
+LLM model lists against the providers' live documentation. 29 commits on
+`review/2026-09-06-bug-sweep`, one per finding.
+
+### Fixed in this pass
+
+| Severity | File | Finding |
+|---|---|---|
+| **major** | `backend/ocr_engines/paddle_ocr.py` | `get_instance()` held the class lock for the whole model construction, and `get_loaded_languages()` takes the same lock. `/health` calls the latter on the event loop, so the *entire server* froze for the 5–15 s of the first model load, and the popup's 3 s health probe reported "Backend offline" exactly when the user first pressed Translate. Split into a cache lock and a load lock; a test that fails on the old code (it waited 1.4 s) guards it. |
+| **major** | `extension/shared/llm-models.js` (new), `translate-manager.js`, popup | The default LLM model `gemini-2.0-flash` has been shut down by Google; `gemini-1.5-flash` and `gemini-2.5-pro-preview-06-05` are gone; every Claude ID in the picker, including the `claude-sonnet-4-20250514` fallback, is retired; `gpt-4` and `gpt-3.5-turbo` shut down 2026-10-23. Checked against all three providers' model pages. One shared list with current defaults (`gemini-2.5-flash`, `claude-sonnet-5`, `gpt-4o-mini`); retired IDs already in storage are migrated on load; OpenAI requests use `max_completion_tokens` and omit `temperature` for reasoning models. |
+| major | `extension/background.js` | Non-2xx backend responses reached the user as "OCR request failed", because the content script reads `body.error` and FastAPI writes `detail`. A 501 "not installed", a 422 "unsupported language" and a 413 "too large" were indistinguishable. `describeHttpFailure()` folds the server message in; network failures name the unreachable origin. |
+| major | `extension/background.js`, `shared/text.js`, `backend/paddle_ocr.py` | The MangaOCR path forwarded every PaddleOCR box; the backend rejects the whole request on the first invalid box and caps count (200) and area (50 MP). `selectMangaBboxes()` mirrors the validator. The backend's 2.x result path also emitted zero-area boxes and could emit negative coordinates; filtered and clamped. |
+| major | `extension/background.js`, `popup/App.jsx`, `shared/text.js` | A trailing slash in the backend URL produced `//ocr/paddle` and `//health`, so PaddleOCR/MangaOCR showed "Backend offline" and every OCR request 404ed. `trimTrailingSlashes()` everywhere a base URL is joined. |
+| major | `extension/src/popup/App.jsx` | Clearing a number field to retype it saved `Number("") === 0`; the autosave pushed it to active tabs and `addTranslateIcons()` put a translate button on every 1 px tracking pixel, permanently (icons are only ever added). `NumberField` commits only complete, in-range values. |
+| major | `extension/translate/llm-translate.js` | Numbered-response parser: an empty entry swallowed the next marker, `[2]World` (no space) was not a boundary, and the fallback re-read already-parsed lines by position, shifting translations onto the wrong bubbles. Line-based parser, tested. |
+| major | `extension/translate/llm-translate.js` | Gemini refusals (`promptFeedback.blockReason`, SAFETY/RECITATION finishes, a budget exhausted by thinking) all surfaced as "provider returned no translated text". Named errors; thinking parts skipped; all text parts joined. |
+| major | `extension/translate/libre-translate.js`, `website/lib/translator.ts` | MyMemory quota exhaustion arrives as a 200 with the explanation in `translatedText`; the client stripped it and reported "empty translatedText payload". The warning is now the error (kept as a warning when appended to a real translation); `responseStatus` compared numerically. |
+| minor | `extension/translate/llm-translate.js` | A fixed 2000-token output cap truncated dense pages silently; the budget is now sized from the input (1024–8192) and length stops are logged. `callClaude` read only `content[0]`, so a thinking block first meant an empty answer. |
+| minor | `extension/content.js` | JPEG export (images over 2 MP) composited transparent PNGs onto black, giving black-on-black text and no detections. White fill first. |
+| minor | `extension/content.js` | A cross-origin `<img>` whose cookieless background fetch failed was fetched *again* by the fallback and never tried the CORS canvas read. |
+| minor | `extension/content.js` | Injected `@keyframes spin` overrode any host-page animation of that name. Namespaced. |
+| minor | `extension/content.js`, `background.js` | `ACTIVATE` rejections left `sendResponse` uncalled, and the worker treated any non-null reply as success. Error replies plus an explicit success check. |
+| minor | `extension/overlay.js` | Vertical layout measured columns at 1.15× but drew them at 1.2× font size, so accepted sizes could overflow by 4% and clip. One shared constant. |
+| minor | `extension/shared/preferences.js` | `mergeWithDefaults` copied stored values verbatim (`"5"`, `""`, `"false"`). Coerced to the default's type. |
+| minor | `extension/manifest.json`, `MANIFEST_GUIDE.md` | Unused `scripting` permission; `icons/*` and `utils/*` web-accessible (probeable) though never imported. Removed; the guide described a permission set from several releases ago and is rewritten. |
+| minor | `extension/src/popup/components/ErrorBoundary.jsx` | "Reset Settings" ran `storage.local.clear()`, deleting the Auth0 session, the disabled-domain list and the audio cache. Removes only the settings keys. |
+| minor | `extension/background.js` | `UPDATE_PROGRESS` never replied to a non-tab sender (promise pending until worker teardown). |
+| minor | `website/components/sections/DemoSection.tsx` | "See it in Action" linked to `/contact` instead of the `/translate` demo. |
+| minor | `backend/test_server.py` | Accepted 400 *or* 501 for invalid base64; the shared TestClient IP would hit the 60/min limiter as the suite grew. Deterministic contracts, autouse limiter reset, eight new tests (413, 422 over HTTP, 400 vs 500, both 501s, streamed-body cap, 429 + Retry-After, security headers). |
+| docs | `README.md`, `backend/README.md`, `website/README.md`, `CONTRIBUTING.md`, `REPO_MAP.md` | Python 3.8+ vs the 3.10+ syntax the server uses; "requirements.txt installs PaddleOCR"; three-field `/health`; missing `lang`; a "Clear Overlays" button that does not exist; step numbering; a "Font Size auto, 10-48" row; the website tree; the repository still called Hack-SMU-VII. |
+
+### Redundancy removed
+
+| Cluster | Was | Now |
+|---|---|---|
+| bbox `[x1,y1,x2,y2]` → `{x,y,width,height}` | `toContentScriptBlocks` plus three inline copies in `background.js` | one `toContentScriptBlocks(blocks, defaults)` in `shared/text.js` |
+| provider model rules | `PROVIDER_MODEL_RULES` (translate-manager), `DEFAULT_PROVIDER_MODELS` + `PROVIDER_MODEL_PREFIXES` (App.jsx), `MODEL_OPTIONS` (TranslateSettings) | `shared/llm-models.js` |
+| trailing-slash regex | two hand-rolled copies, two sites with none | `trimTrailingSlashes` |
+
+### Verified after every change
+
+`extension`: `npm test` 48/48, `npm run build` clean. `backend`: `pytest -v` 45 passed
+(29 → 45; `test_paddle_ocr.py` is new and runs the wrapper against a stub `paddleocr`,
+so CI now covers `paddle_ocr.py` for the first time). `website`: `eslint .`,
+`tsc --noEmit`, `next build` clean.
+
+### Still open
+
+Everything in the 2026-09-01 list below still stands (Firefox, Docker unverified,
+offscreen lifetime, Tesseract `auto`, MyMemory-or-nothing free tier, preference
+sync, the website's second renderer, the stop-word list, root `.env.example`).
+New in this pass:
+
+- **Gemini thinking budget** — `maxOutputTokens` is shared with thinking on Gemini
+  2.5. The larger budget makes exhaustion rare and it is now reported clearly, but
+  a `thinkingConfig` (2.5) / `thinking_level` (3.x) would be the proper fix once
+  the per-model rules are pinned down.
+- **`gemini-3.8-flash` in the picker** — taken from Google's model page on
+  2026-09-06; not exercised against the API from here. Nor were the Claude 5 /
+  GPT-5 IDs; the shapes are the documented ones.
+- **Website GitHub link** still points at `bornayo7/Hack-SMU-VII` (the original
+  team repo). Whether it should point here is a product call.
+- **Backend dependency pins** — `requirements.txt` is all `>=`; Starlette 1.6
+  already warns that the httpx-based TestClient is deprecated, so CI will break
+  on a future release without a lockfile.
+
+---
+
 ## Review pass — 2026-09-01
 
 A second full read of the tree, running every build and test suite first.
