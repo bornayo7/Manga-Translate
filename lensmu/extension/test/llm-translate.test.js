@@ -44,3 +44,19 @@ test('parseNumberedResponse handles CRLF, out-of-range markers and empty input',
   assert.deepEqual(parseNumberedResponse('', 2), ['', '']);
   assert.deepEqual(parseNumberedResponse(undefined, 1), ['']);
 });
+
+import { extractClaudeText } from '../translate/llm-translate.js';
+
+test('extractClaudeText skips thinking blocks and joins every text block', () => {
+  const data = {
+    content: [
+      { type: 'thinking', thinking: 'The first bubble is a greeting.' },
+      { type: 'text', text: '[1] Hello' },
+      { type: 'text', text: '[2] Goodbye' }
+    ]
+  };
+
+  assert.equal(extractClaudeText(data), '[1] Hello\n[2] Goodbye');
+  assert.equal(extractClaudeText({ content: [{ type: 'thinking', thinking: '...' }] }), '');
+  assert.equal(extractClaudeText({}), '');
+});
