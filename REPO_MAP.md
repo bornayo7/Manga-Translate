@@ -3,7 +3,7 @@
 ## Top-level structure
 
 ```text
-Hack-SMU-VII/
+Manga-Translate/
   README.md
   lensmu/
     backend/
