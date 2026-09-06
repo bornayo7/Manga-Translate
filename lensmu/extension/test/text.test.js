@@ -91,3 +91,13 @@ test('toContentScriptBlocks tolerates a missing detections list', () => {
   assert.deepEqual(toContentScriptBlocks(undefined), []);
   assert.deepEqual(toContentScriptBlocks(null), []);
 });
+
+import { trimTrailingSlashes } from '../shared/text.js';
+
+test('trimTrailingSlashes strips the slashes a pasted base URL usually carries', () => {
+  assert.equal(trimTrailingSlashes('http://localhost:8000/'), 'http://localhost:8000');
+  assert.equal(trimTrailingSlashes('  http://localhost:11434/v1// '), 'http://localhost:11434/v1');
+  assert.equal(trimTrailingSlashes('http://localhost:8000'), 'http://localhost:8000');
+  assert.equal(trimTrailingSlashes(''), '');
+  assert.equal(trimTrailingSlashes(undefined), '');
+});

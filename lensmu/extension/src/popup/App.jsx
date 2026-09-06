@@ -10,6 +10,7 @@ import {
   SETTINGS_STORAGE_KEY,
   mergeWithDefaults,
 } from "../../shared/preferences.js";
+import { trimTrailingSlashes } from "../../shared/text.js";
 
 const TAB_ITEMS = [
   { id: "home", label: "Home" },
@@ -290,7 +291,9 @@ export default function App() {
 
       try {
         const timeoutId = window.setTimeout(() => controller.abort(), 3000);
-        const response = await fetch(`${settings.backendUrl}/health`, {
+        const backendUrl =
+          trimTrailingSlashes(settings.backendUrl) || DEFAULT_EXTENSION_SETTINGS.backendUrl;
+        const response = await fetch(`${backendUrl}/health`, {
           method: "GET",
           signal: controller.signal,
         });

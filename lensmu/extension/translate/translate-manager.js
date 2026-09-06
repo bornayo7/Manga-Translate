@@ -10,7 +10,7 @@
 
 import { translateWithLLM } from './llm-translate.js';
 import { translateWithMyMemory } from './libre-translate.js';
-import { isEffectivelyIdenticalTranslation } from '../shared/text.js';
+import { isEffectivelyIdenticalTranslation, trimTrailingSlashes } from '../shared/text.js';
 
 const PROVIDER_MODEL_RULES = Object.freeze({
   openai: { prefix: 'gpt-', fallback: 'gpt-4o-mini' },
@@ -532,8 +532,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       }
 
       case 'custom': {
-        const rawBaseUrl = (settings.customBaseUrl || '').trim();
-        const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+        const baseUrl = trimTrailingSlashes(settings.customBaseUrl);
         if (!baseUrl) {
           throw new Error(
             'Custom API requires a base URL. Please add your API base URL in the extension settings.'

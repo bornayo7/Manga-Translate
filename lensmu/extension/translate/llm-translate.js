@@ -60,6 +60,7 @@
  * The prompt is designed to work well with both OpenAI and Claude models.
  */
 import { fetchWithTimeout } from '../shared/fetch-with-timeout.js';
+import { trimTrailingSlashes } from '../shared/text.js';
 
 const MANGA_TRANSLATION_SYSTEM_PROMPT = `You are an expert manga/comic translator with deep knowledge of Japanese, Chinese, Korean, and other Asian languages. You translate text extracted from manga panels, comic speech bubbles, signs, and other image-based text.
 
@@ -387,7 +388,7 @@ async function callGemini(userMessage, apiKey, model) {
  * @returns {Promise<string>}  — The model's response text
  */
 async function callCustom(userMessage, apiKey, model, baseUrl) {
-  const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const url = `${trimTrailingSlashes(baseUrl)}/chat/completions`;
 
   const headers = {
     'Content-Type': 'application/json'
