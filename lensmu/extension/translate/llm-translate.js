@@ -428,6 +428,14 @@ async function callCustom(userMessage, apiKey, model, baseUrl) {
   return data.choices?.[0]?.message?.content || '';
 }
 
+/*
+ * A line that starts a new numbered entry: "[1] text", "1. text", "1) text",
+ * "[1]text", optionally wrapped in markdown bold. The number and the rest of
+ * the line are captured. A colon is deliberately not a delimiter so a
+ * continuation line such as "1:30 PM" is never mistaken for a marker.
+ */
+const NUMBERED_MARKER_PATTERN = /^\s*(?:\*\*)?\[?\s*(\d+)\s*[\].)]\s*(?:\*\*)?\s*(.*)$/;
+
 /**
  * Parse a numbered response from the LLM into an array of translations.
  *
@@ -436,70 +444,66 @@ async function callCustom(userMessage, apiKey, model, baseUrl) {
  *   [2] Goodbye
  *   [3] BOOM (ドーン)
  *
- * This parser is intentionally forgiving — LLMs sometimes add extra
- * whitespace, blank lines, or slight format variations. We handle:
- *   - "[1]" or "1." or "1)" as number prefixes
- *   - Extra blank lines between entries
- *   - Missing numbers (we try to infer from position)
+ * The parser walks the response line by line. A line whose marker number
+ * is larger than the previous one (and within the expected range) starts a
+ * new entry; every other line, including blank ones and any preamble, is
+ * appended to the entry that is open. That keeps multi-line translations
+ * intact, lets an entry legitimately be empty, and stops a "2024." or a
+ * numbered list *inside* a translation from being read as the next entry.
+ *
+ * If no marker is found at all the response is treated as bare lines: a
+ * single-block request takes the whole text, and a response with exactly
+ * one non-empty line per block is mapped by position.
  *
  * @param {string} responseText — The raw LLM response
  * @param {number} expectedCount — How many translations we expect
  * @returns {string[]}          — Array of translated strings
  */
-function parseNumberedResponse(responseText, expectedCount) {
-  /*
-   * Strategy: Use regex to find all [N] patterns and extract text after them.
-   * The text for entry N extends from after [N] to just before [N+1] (or end).
-   */
+export function parseNumberedResponse(responseText, expectedCount) {
+  const lines = String(responseText || '').replace(/\r\n?/g, '\n').split('\n');
   const entries = new Map();
+  let currentIndex = -1;
+  let currentLines = [];
+  let lastMarker = 0;
 
-  /*
-   * Match patterns like:
-   *   [1] some text
-   *   [2] more text
-   *   1. some text
-   *   1) some text
-   *
-   * The regex captures the number and the text after it.
-   * We use a global match to find all entries.
-   */
-  const pattern = /\[(\d+)\]\s*(.+?)(?=\n\[?\d+[\].)]\s|\n*$)/gs;
-  let match;
+  const flush = () => {
+    if (currentIndex >= 0) {
+      entries.set(currentIndex, currentLines.join('\n').trim());
+    }
+    currentLines = [];
+  };
 
-  while ((match = pattern.exec(responseText)) !== null) {
-    const index = parseInt(match[1], 10) - 1; // Convert 1-based to 0-based
-    const text = match[2].trim();
-    if (index >= 0 && index < expectedCount) {
-      entries.set(index, text);
+  for (const line of lines) {
+    const match = line.match(NUMBERED_MARKER_PATTERN);
+    const marker = match ? parseInt(match[1], 10) : 0;
+
+    if (match && marker > lastMarker && marker <= expectedCount) {
+      flush();
+      currentIndex = marker - 1;
+      lastMarker = marker;
+      currentLines = [match[2]];
+      continue;
+    }
+
+    if (currentIndex >= 0) {
+      currentLines.push(line);
+    }
+  }
+  flush();
+
+  if (entries.size === 0) {
+    const bareLines = lines.map((line) => line.trim()).filter((line) => line.length > 0);
+
+    if (expectedCount === 1) {
+      return [bareLines.join('\n')];
+    }
+
+    if (bareLines.length === expectedCount) {
+      return bareLines;
     }
   }
 
-  /*
-   * If the regex didn't find enough entries (LLM used a different format),
-   * fall back to splitting by newlines and taking non-empty lines.
-   */
-  if (entries.size < expectedCount) {
-    const lines = responseText
-      .split('\n')
-      .map((line) => line.replace(/^\[?\d+[\].)]\s*/, '').trim())
-      .filter((line) => line.length > 0);
-
-    for (let i = 0; i < Math.min(lines.length, expectedCount); i++) {
-      if (!entries.has(i)) {
-        entries.set(i, lines[i]);
-      }
-    }
-  }
-
-  /*
-   * Build the final array, using empty string for any missing entries.
-   */
-  const result = [];
-  for (let i = 0; i < expectedCount; i++) {
-    result.push(entries.get(i) || '');
-  }
-
-  return result;
+  return Array.from({ length: expectedCount }, (_, index) => entries.get(index) || '');
 }
 
 /**
