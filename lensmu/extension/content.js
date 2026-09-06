@@ -1591,6 +1591,16 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (bailIfJobStopped('background-fetch-cancelled') === null) {
         return null;
       }
+
+      /*
+       * The background fetch is cookieless, so an image behind a login
+       * comes back 401/403 even though the page itself displays it. If the
+       * host also serves CORS headers (crossorigin="anonymous" images, most
+       * CDNs), the pixels can still be read straight off the element.
+       */
+      if (!imageBase64 && type === 'img') {
+        imageBase64 = imageToBase64(element);
+      }
     } else if (type === 'background') {
       try {
         if (bailIfJobStopped('background-image-load-cancelled') === null) {
@@ -1608,7 +1618,13 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       imageBase64 = imageToBase64(element);
     }
 
-    if (!imageBase64 && url) {
+    /*
+     * Last resort for same-origin images and CSS backgrounds whose canvas
+     * read failed (SVG with foreignObject, a failed CORS load). Cross-origin
+     * <img> elements already tried this exact fetch above, so do not repeat
+     * a request that just failed.
+     */
+    if (!imageBase64 && url && !prefersBackgroundFetch) {
       if (bailIfJobStopped('fallback-background-fetch-cancelled') === null) {
         return null;
       }
