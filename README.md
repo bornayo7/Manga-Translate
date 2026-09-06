@@ -95,7 +95,7 @@ VisionTranslate uses OCR (Optical Character Recognition) to extract text from im
 
 | Requirement       | Minimum Version | How to Check          | Install Guide                          |
 |-------------------|-----------------|-----------------------|----------------------------------------|
-| Python            | 3.8+            | `python3 --version`   | https://www.python.org/downloads/      |
+| Python            | 3.10 to 3.12    | `python3 --version`   | https://www.python.org/downloads/      |
 | pip               | 21.0+           | `pip3 --version`      | Comes with Python                      |
 | Node.js           | 20.19+          | `node --version`      | https://nodejs.org/                    |
 | npm               | 9.0+            | `npm --version`       | Comes with Node.js                     |
@@ -144,7 +144,7 @@ pip install -r requirements.txt
 
 **Optional: Install OCR engines**
 
-PaddlePaddle and manga-ocr require **Python 3.8–3.12**. If you're on Python 3.13+, skip this step and use Tesseract.js (runs in the browser, no server needed) or Google Cloud Vision from the extension settings.
+PaddlePaddle and manga-ocr require **Python 3.10–3.12** (the server itself uses 3.10+ syntax). If you're on Python 3.13+, skip this step and use Tesseract.js (runs in the browser, no server needed) or Google Cloud Vision from the extension settings.
 
 ```bash
 # macOS (Apple Silicon):
@@ -218,16 +218,16 @@ browser test job before advertising Firefox support.
 
 ## How to Use
 
-1. **Start the backend** (if using PaddleOCR or MangaOCR — skip if using Tesseract.js)
-2. **Click the VisionTranslate icon** in your browser toolbar
+1. **Start the backend** — only for PaddleOCR or MangaOCR. Tesseract.js and Google Cloud Vision need no server.
+2. **Click the VisionTranslate icon** in your browser toolbar.
 3. **Configure your settings:**
-   - **OCR Engine:** PaddleOCR (best for most languages), MangaOCR (best for Japanese manga), Tesseract.js (no backend needed), or Google Cloud Vision
-   - **Translation Provider:** Choose your preferred service
-   - **Target Language:** The language you want to translate INTO
-4. **Navigate to a page with images** containing foreign-language text
-5. **Click "Translate This Page"** in the popup
-6. **Translated text appears** overlaid on the images
-8. **Click "Clear Overlays"** to remove all translations
+   - **Engines tab → OCR engine:** PaddleOCR (best for most languages), MangaOCR (best for Japanese manga), Tesseract.js (no backend needed), Google Cloud Vision, or a custom OCR endpoint
+   - **Engines tab → Translation provider:** OpenAI, Claude, Gemini, a custom OpenAI-compatible API (each needs its key), or MyMemory (free, no key, small daily quota)
+   - **Home tab → Languages:** the language the images are in (or auto-detect) and the language to translate INTO
+4. **Open a page with images.** With "Activate automatically" on (the default), every image large enough to hold text gets a small **文A** button in its corner. Nothing is translated until you ask.
+5. **Click a 文A button** to translate that image, or **Translate All** next to any button / **Translate This Page** in the popup to do them all.
+6. **Click a translated image** to flip between the translation and the original.
+7. **Switch the page toggle off** in the popup (or press **Alt+Shift+V**) to remove every overlay and keep the extension off for that site until you switch it back on.
 
 ### Tips for Best Results
 
@@ -239,16 +239,25 @@ browser test job before advertising Firefox support.
 
 ## Configuration Options
 
-| Option                | Values                                     | Default       | Description                                                                 |
-|-----------------------|--------------------------------------------|---------------|-----------------------------------------------------------------------------|
-| OCR Engine            | PaddleOCR, MangaOCR, Tesseract.js, Cloud Vision | Tesseract.js | Which OCR engine to use for text extraction                              |
-| Translation Provider  | OpenAI, Claude, Gemini, custom API, MyMemory | MyMemory     | Which translation service to use                                         |
-| Target Language       | en, ja, zh, ko, es, fr, de, ... (ISO 639)  | en            | Language to translate INTO                                                  |
-| Source Language        | auto, en, ja, zh, ko, es, fr, de, ...      | auto          | Language to translate FROM (auto = auto-detect)                             |
-| Backend URL           | Any URL                                    | localhost:8000| Where the Python backend is running                                         |
-| Overlay Opacity       | 0.0 - 1.0                                 | 1.0           | How opaque the translation overlay is                                       |
-| Public fallback       | On / Off                                  | Off           | Whether a failed private/paid provider may retry through MyMemory             |
-| Font Size             | auto, 10-48                                | auto          | Font size for overlay text ("auto" scales to detected text region)          |
+| Option                   | Values                                                          | Default               | Description                                                                 |
+|--------------------------|-----------------------------------------------------------------|-----------------------|-----------------------------------------------------------------------------|
+| OCR engine               | PaddleOCR, MangaOCR, Tesseract.js, Google Cloud Vision, Custom  | Tesseract.js          | Which OCR engine extracts the text                                          |
+| Translation provider     | OpenAI, Claude, Gemini, custom OpenAI-compatible API, MyMemory  | MyMemory              | Which translation service to use                                            |
+| Model                    | Per provider (see the picker)                                   | Provider default      | LLM model for OpenAI, Claude and Gemini                                     |
+| Source language          | auto, en, ja, zh-CN, zh-TW, ko, es, fr, de, ...                 | auto                  | Language to translate FROM (auto = auto-detect)                             |
+| Target language          | en, ja, zh-CN, zh-TW, ko, es, fr, de, ...                       | en                    | Language to translate INTO                                                  |
+| Backend server URL       | Any URL                                                         | http://localhost:8000 | Where the Python backend runs (PaddleOCR and MangaOCR only)                 |
+| Public-provider fallback | On / Off                                                        | Off                   | Whether a failed private/paid provider may retry through MyMemory           |
+| Overlay font             | Sans Serif, Serif, Manga-Friendly, Monospace                    | Sans Serif            | Font family for the translated text                                         |
+| Minimum font size        | 8, 10, 12, 14, 16 px                                            | 10 px                 | Smallest size the overlay will shrink text to                               |
+| Alignment                | Auto, Left, Center, Right                                       | Auto                  | Text alignment inside each block (Auto follows the source layout)           |
+| Overlay opacity          | 0% – 100%                                                       | 100%                  | How opaque the translation overlay is                                       |
+| Preprocess in background | On / Off                                                        | Off                   | Run OCR and translation ahead of the click so the overlay appears instantly |
+| Activate automatically   | On / Off                                                        | On                    | Show the per-image buttons on every site not switched off                   |
+| Minimum image size       | 32 – 4096 px wide / high                                        | 100 × 50 px           | Ignore images smaller than this                                             |
+| Parallel images          | 1 – 12                                                          | 5                     | How many images are processed at once                                       |
+| Read Aloud               | On / Off + ElevenLabs key, voice, model                         | Off                   | Adds a Read button that speaks the translated text                          |
+| Low-confidence markers   | On / Off                                                        | On                    | Thin warning underline on weaker OCR regions                                |
 
 
 ## Test URLs
@@ -269,49 +278,53 @@ Try these pages to test the extension:
 Manga-Translate/
   README.md                     # This file
   LICENSE                       # MIT License
-  .env.example                  # API key documentation
+  .env.example                  # Documents the keys the popup asks for (no code reads it)
+  .github/workflows/ci.yml      # CI: extension tests + build, website lint/typecheck/build, backend tests
+  setup.sh / setup.ps1          # One-command setup (backend venv + extension build)
+  AGENTS.md, REPO_MAP.md, PIPELINES.md, TASK_STATE.md, DECISIONS.md, AUDIT.md
+                                # Context files for coding assistants
 
   lensmu/
     backend/                    # Python FastAPI server
       server.py                 # Server entry point, API routes
       security.py               # Rate limiting, input validation, security headers
-      test_server.py            # Pytest test suite
+      test_server.py            # API contract tests
+      test_paddle_ocr.py        # PaddleOCR wrapper tests (run against a stub engine)
+      requirements.txt          # Core Python dependencies
+      requirements-ocr.txt      # Optional OCR engine dependencies
       requirements-dev.txt      # Server and test dependencies
       Dockerfile                # Container build file
       .dockerignore             # Docker build exclusions
       ocr_engines/              # OCR engine wrappers
         paddle_ocr.py           # PaddleOCR wrapper
         manga_ocr.py            # MangaOCR wrapper
-      requirements.txt          # Core Python dependencies
-      requirements-ocr.txt      # OCR engine dependencies
 
     extension/                  # Chromium browser extension
-      manifest.json             # Extension manifest
-      background.js             # Service worker (message routing, state)
-      content.js                # Content script (finds images, injects overlay)
-      overlay.js                # Canvas rendering engine
+      manifest.json             # Extension manifest (MANIFEST_GUIDE.md explains every field)
+      background.js             # Service worker (message routing, OCR proxy, tab state)
+      content.js                # Content script (finds images, per-image controls, pipeline)
+      overlay.js                # Canvas rendering engine (grouping, layout, drawing)
+      offscreen/                # Offscreen document that runs Tesseract.js
+      ocr/tesseract.js          # In-browser OCR worker wrapper
+      translate/                # Translation providers
+        translate-manager.js    # Provider router and already-translated heuristics
+        llm-translate.js        # OpenAI / Claude / Gemini / custom client
+        libre-translate.js      # MyMemory client
+      tts/elevenlabs.js         # Read-aloud synthesis and audio cache
+      auth/auth0.js             # Auth0 PKCE sign-in
+      shared/                   # Canonical preferences, model lists, text helpers (shared with the website)
+      utils/storage.js          # chrome.storage access and legacy migration
+      src/popup/                # Popup UI (React)
+        App.jsx                 # Main popup component
+        components/             # Settings sub-components
+      test/                     # node --test unit tests
+      lib/                      # Vendored Tesseract.js runtime and WASM cores
+      icons/                    # Extension icons
       package.json              # Node.js dependencies
       vite.config.js            # Vite build configuration
+      dist/                     # Built popup (generated by npm run build)
 
-      src/
-        popup/                  # Popup UI (React)
-          App.jsx               # Main popup component
-          components/           # Settings sub-components
-
-      shared/                   # Canonical extension preferences
-
-      ocr/
-        tesseract.js            # In-browser OCR worker wrapper
-
-      translate/                # Translation providers
-        translate-manager.js    # Provider router
-        llm-translate.js        # OpenAI/Claude/Gemini client
-        libre-translate.js      # MyMemory client
-
-      icons/                    # Extension icons
-      dist/                     # Built files (generated by npm run build)
-
-    website/                    # Next.js marketing site and limited demo
+    website/                    # Next.js marketing site, limited demo and preferences API
 ```
 
 
