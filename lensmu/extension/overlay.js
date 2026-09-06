@@ -675,7 +675,14 @@ export const TEXT_RENDER_TUNING = {
   maxFontSize: 72,
   minLineHeight: 1.08,
   maxLineHeight: 1.3,
-  titleCenterWordThreshold: 10
+  titleCenterWordThreshold: 10,
+  /*
+   * Vertical (tategaki) layout: the column pitch and glyph pitch are used
+   * both when measuring whether a font size fits and when drawing, so the
+   * two can never disagree about how wide a column is.
+   */
+  verticalColumnWidthRatio: 1.2,
+  verticalCharHeightRatio: 1.1
 };
 
 const OVERLAY_FONT_STACKS = {
@@ -1267,14 +1274,15 @@ function autoSizeFont(ctx, text, maxWidth, maxHeight, fontFamily, isVertical, mi
 
     if (isVertical) {
       const normalizedText = normalizeTranslationText(text);
-      const charsPerColumn = Math.max(1, Math.floor(maxHeight / (size * 1.1)));
+      const charHeight = size * TEXT_RENDER_TUNING.verticalCharHeightRatio;
+      const charsPerColumn = Math.max(1, Math.floor(maxHeight / charHeight));
       const columns = [];
 
       for (let i = 0; i < normalizedText.length; i += charsPerColumn) {
         columns.push(normalizedText.slice(i, i + charsPerColumn));
       }
 
-      const columnWidth = size * 1.15;
+      const columnWidth = size * TEXT_RENDER_TUNING.verticalColumnWidthRatio;
       const totalWidth = columns.length * columnWidth;
 
       if (totalWidth > maxWidth) {
@@ -1283,7 +1291,7 @@ function autoSizeFont(ctx, text, maxWidth, maxHeight, fontFamily, isVertical, mi
 
       return {
         lines: columns,
-        lineHeight: size * 1.1
+        lineHeight: charHeight
       };
     }
 
@@ -1563,8 +1571,8 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
        * VERTICAL TEXT RENDERING:
        * Each "line" is a column of characters. Columns go right-to-left.
        */
-      const columnWidth = fontSize * 1.2;
-      const charHeight = fontSize * 1.1;
+      const columnWidth = fontSize * TEXT_RENDER_TUNING.verticalColumnWidthRatio;
+      const charHeight = fontSize * TEXT_RENDER_TUNING.verticalCharHeightRatio;
 
       for (let colIdx = 0; colIdx < lines.length; colIdx++) {
         const column = lines[colIdx];
