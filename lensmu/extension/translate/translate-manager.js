@@ -11,22 +11,9 @@
 import { translateWithLLM } from './llm-translate.js';
 import { translateWithMyMemory } from './libre-translate.js';
 import { isEffectivelyIdenticalTranslation, trimTrailingSlashes } from '../shared/text.js';
+import { resolveProviderModel } from '../shared/llm-models.js';
 
-const PROVIDER_MODEL_RULES = Object.freeze({
-  openai: { prefix: 'gpt-', fallback: 'gpt-4o-mini' },
-  claude: { prefix: 'claude-', fallback: 'claude-sonnet-4-20250514' },
-  gemini: { prefix: 'gemini-', fallback: 'gemini-2.0-flash' }
-});
-
-export function resolveProviderModel(provider, configuredModel) {
-  const rule = PROVIDER_MODEL_RULES[provider];
-  if (!rule) {
-    return String(configuredModel || '').trim();
-  }
-
-  const model = String(configuredModel || '').trim();
-  return model.startsWith(rule.prefix) ? model : rule.fallback;
-}
+export { resolveProviderModel };
 
 const LANGUAGE_ALIASES = {
   english: 'en',

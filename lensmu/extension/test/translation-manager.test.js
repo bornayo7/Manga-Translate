@@ -28,10 +28,7 @@ test('an explicit source matching the target is skipped', () => {
 });
 
 test('provider model resolution never sends a Gemini model to OpenAI or Claude', () => {
-  assert.equal(resolveProviderModel('openai', 'gemini-2.0-flash'), 'gpt-4o-mini');
-  assert.equal(
-    resolveProviderModel('claude', 'gemini-2.0-flash'),
-    'claude-sonnet-4-20250514'
-  );
+  assert.equal(resolveProviderModel('openai', 'gemini-2.5-flash'), 'gpt-4o-mini');
+  assert.equal(resolveProviderModel('claude', 'gemini-2.5-flash'), 'claude-sonnet-5');
   assert.equal(resolveProviderModel('gemini', 'gemini-2.5-flash'), 'gemini-2.5-flash');
 });

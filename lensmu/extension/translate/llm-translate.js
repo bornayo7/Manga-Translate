@@ -27,8 +27,9 @@
  *
  * SUPPORTED PROVIDERS:
  * --------------------
- *   - OpenAI: GPT-4o, GPT-4o-mini, GPT-4-turbo (via api.openai.com)
- *   - Claude: Claude 3.5 Sonnet, Claude 3 Opus, etc. (via api.anthropic.com)
+ *   - OpenAI (api.openai.com), Anthropic Claude (api.anthropic.com), Google
+ *     Gemini, and any OpenAI-compatible endpoint. The model IDs on offer live
+ *     in shared/llm-models.js.
  *
  * BATCHING STRATEGY:
  * ------------------
@@ -61,6 +62,7 @@
  */
 import { fetchWithTimeout } from '../shared/fetch-with-timeout.js';
 import { trimTrailingSlashes } from '../shared/text.js';
+import { openAiModelSupportsTemperature } from '../shared/llm-models.js';
 
 const MANGA_TRANSLATION_SYSTEM_PROMPT = `You are an expert manga/comic translator with deep knowledge of Japanese, Chinese, Korean, and other Asian languages. You translate text extracted from manga panels, comic speech bubbles, signs, and other image-based text.
 
@@ -182,6 +184,37 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
  * @returns {Promise<string>}  — The model's response text
  */
 async function callOpenAI(userMessage, apiKey, model) {
+  const requestBody = {
+    model: model,
+    messages: [
+      {
+        role: 'system',
+        content: MANGA_TRANSLATION_SYSTEM_PROMPT
+      },
+      {
+        role: 'user',
+        content: userMessage
+      }
+    ],
+    /*
+     * max_completion_tokens limits response length; the older max_tokens
+     * name is rejected by the gpt-5 family. We set a generous limit since
+     * translations can be longer than the original (especially JP→EN).
+     * 2000 tokens is enough for ~30-40 text blocks.
+     */
+    max_completion_tokens: 2000
+  };
+
+  /*
+   * Temperature controls randomness. 0.3 gives mostly deterministic
+   * translations while allowing some natural variation. Pure 0 can
+   * sometimes produce stiff translations. Reasoning models only accept
+   * the default, so the field is omitted for them.
+   */
+  if (openAiModelSupportsTemperature(model)) {
+    requestBody.temperature = 0.3;
+  }
+
   const response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -192,31 +225,7 @@ async function callOpenAI(userMessage, apiKey, model) {
        */
       'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        {
-          role: 'system',
-          content: MANGA_TRANSLATION_SYSTEM_PROMPT
-        },
-        {
-          role: 'user',
-          content: userMessage
-        }
-      ],
-      /*
-       * Temperature controls randomness. 0.3 gives mostly deterministic
-       * translations while allowing some natural variation. Pure 0 can
-       * sometimes produce stiff translations.
-       */
-      temperature: 0.3,
-      /*
-       * max_tokens limits response length. We set a generous limit since
-       * translations can be longer than the original (especially JP→EN).
-       * 2000 tokens is enough for ~30-40 text blocks.
-       */
-      max_tokens: 2000
-    })
+    body: JSON.stringify(requestBody)
   });
 
   if (!response.ok) {
