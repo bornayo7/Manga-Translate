@@ -73,7 +73,7 @@ export function DemoSection() {
                 )}
               </div>
               <Button variant="default" size="lg" className="rounded-full shadow-glow" asChild>
-                <a href="/contact">
+                <a href="/translate">
                   See it in Action
                   <ArrowRight className="h-5 w-5 ml-2" />
                 </a>
