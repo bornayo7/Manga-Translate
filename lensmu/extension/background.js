@@ -67,7 +67,7 @@ import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation 
 import { toContentScriptSettings } from './shared/preferences.js';
 import { fetchWithTimeout } from './shared/fetch-with-timeout.js';
 import { readResponseBytesWithLimit } from './shared/response-limits.js';
-import { describeHttpFailure, stripDataUrlPrefix, toErrorMessage } from './shared/text.js';
+import { describeHttpFailure, selectMangaBboxes, stripDataUrlPrefix, toErrorMessage } from './shared/text.js';
 
 /*
  * --------------------------------------------------------------------------
@@ -778,7 +778,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
 
             const paddleDetections = detectResponse.body.detections || [];
-            const mangaBboxes = paddleDetections.map(d => d.bbox);
+
+            /*
+             * Only post boxes the backend will accept: it validates every
+             * box and rejects the whole request (422) on the first bad one,
+             * caps the count at 200 and the summed area at 50 MP. Boxes are
+             * in reading order, so trimming keeps the top of the page.
+             */
+            const mangaBboxes = selectMangaBboxes(paddleDetections);
+            if (mangaBboxes.length < paddleDetections.length) {
+              console.warn(
+                `[VisionTranslate] Sending ${mangaBboxes.length} of ${paddleDetections.length} PaddleOCR boxes to MangaOCR (rest invalid or over the request limits).`
+              );
+            }
 
             /*
              * MangaOCR recognizes crops; it cannot detect regions on its own.
