@@ -308,8 +308,19 @@ async function callClaude(userMessage, apiKey, model) {
    *     "text": "[1] Hello\n[2] Goodbye"
    *   }]
    * }
+   *
+   * Current models may put a "thinking" block first, so take every text
+   * block rather than assuming content[0] is the answer.
    */
-  return data.content?.[0]?.text || '';
+  return extractClaudeText(data);
+}
+
+export function extractClaudeText(data) {
+  const blocks = Array.isArray(data?.content) ? data.content : [];
+  return blocks
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n');
 }
 
 /**
