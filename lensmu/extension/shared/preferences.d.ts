@@ -81,6 +81,11 @@ export function clampNumber(
   fallback: number
 ): number;
 
+export function coerceSettingValue<K extends keyof ExtensionSettings>(
+  key: K,
+  value: unknown
+): ExtensionSettings[K];
+
 export function mergeWithDefaults(
   partial?: Partial<ExtensionSettings>
 ): ExtensionSettings;

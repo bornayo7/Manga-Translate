@@ -21,6 +21,34 @@ test('mergeWithDefaults fills missing values and drops unknown keys', () => {
   assert.equal('surpriseToken' in merged, false);
 });
 
+test('mergeWithDefaults coerces stored values to the type of their default', () => {
+  const merged = mergeWithDefaults({
+    minImageWidth: '250',
+    minImageHeight: '',
+    maxConcurrentImages: null,
+    overlayOpacity: 'not a number',
+    elevenLabsSpeed: NaN,
+    autoTranslate: 'false',
+    darkMode: 1,
+    prefetchTranslations: 'yes',
+    targetLanguage: 42,
+    backendUrl: null,
+    llmModel: ['gpt-4o-mini']
+  });
+
+  assert.equal(merged.minImageWidth, 250);
+  assert.equal(merged.minImageHeight, DEFAULT_EXTENSION_SETTINGS.minImageHeight);
+  assert.equal(merged.maxConcurrentImages, DEFAULT_EXTENSION_SETTINGS.maxConcurrentImages);
+  assert.equal(merged.overlayOpacity, DEFAULT_EXTENSION_SETTINGS.overlayOpacity);
+  assert.equal(merged.elevenLabsSpeed, DEFAULT_EXTENSION_SETTINGS.elevenLabsSpeed);
+  assert.equal(merged.autoTranslate, false);
+  assert.equal(merged.darkMode, true);
+  assert.equal(merged.prefetchTranslations, DEFAULT_EXTENSION_SETTINGS.prefetchTranslations);
+  assert.equal(merged.targetLanguage, '42');
+  assert.equal(merged.backendUrl, DEFAULT_EXTENSION_SETTINGS.backendUrl);
+  assert.equal(merged.llmModel, DEFAULT_EXTENSION_SETTINGS.llmModel);
+});
+
 test('content-script settings never contain credential values', () => {
   const input = Object.fromEntries(
     SENSITIVE_SETTING_KEYS.map((key) => [key, `private-${key}`])

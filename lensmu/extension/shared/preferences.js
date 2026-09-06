@@ -94,6 +94,51 @@ export function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, numericValue));
 }
 
+// Settings arrive from chrome.storage, from an older schema, or from a sync
+// payload, so a numeric key can hold "5", "" or null and a boolean can hold
+// "true". Coerce each value to the type of its default; anything unusable
+// becomes the default instead of leaking a NaN or a truthy string into the
+// pipeline, where every consumer would otherwise have to re-validate it.
+export function coerceSettingValue(key, value) {
+  const fallback = DEFAULT_EXTENSION_SETTINGS[key];
+
+  switch (typeof fallback) {
+    case 'number': {
+      if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : fallback;
+      }
+      if (typeof value === 'string' && value.trim() !== '') {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : fallback;
+      }
+      return fallback;
+    }
+    case 'boolean': {
+      if (typeof value === 'boolean') {
+        return value;
+      }
+      if (value === 'true' || value === 1 || value === '1') {
+        return true;
+      }
+      if (value === 'false' || value === 0 || value === '0') {
+        return false;
+      }
+      return fallback;
+    }
+    case 'string': {
+      if (typeof value === 'string') {
+        return value;
+      }
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return String(value);
+      }
+      return fallback;
+    }
+    default:
+      return value;
+  }
+}
+
 export function mergeWithDefaults(partial = {}) {
   const source = partial && typeof partial === 'object' && !Array.isArray(partial)
     ? partial
@@ -103,7 +148,7 @@ export function mergeWithDefaults(partial = {}) {
     SETTING_KEYS.map((key) => [
       key,
       Object.prototype.hasOwnProperty.call(source, key)
-        ? source[key]
+        ? coerceSettingValue(key, source[key])
         : DEFAULT_EXTENSION_SETTINGS[key]
     ])
   );
