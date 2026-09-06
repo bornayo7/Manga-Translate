@@ -266,7 +266,7 @@ Try these pages to test the extension:
 ## Project Structure
 
 ```
-Hack-SMU-VII/
+Manga-Translate/
   README.md                     # This file
   LICENSE                       # MIT License
   .env.example                  # API key documentation

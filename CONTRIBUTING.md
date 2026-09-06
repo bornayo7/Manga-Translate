@@ -8,8 +8,8 @@ Thanks for your interest in contributing to VisionTranslate! This guide covers e
 1. **Fork the repository** on GitHub.
 2. **Clone your fork** locally:
    ```bash
-   git clone https://github.com/YOUR-USERNAME/Hack-SMU-VII.git
-   cd Hack-SMU-VII
+   git clone https://github.com/YOUR-USERNAME/Manga-Translate.git
+   cd Manga-Translate
    ```
 3. **Set up the backend, extension, and website** by following the instructions in the [README](README.md).
 4. **Create a branch** for your work:
