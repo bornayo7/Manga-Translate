@@ -2786,9 +2786,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * payload.settings.
        */
       const settings = payload?.settings || message.settings || payload;
-      activate(settings).then(() => {
-        sendResponse({ success: true });
-      });
+      activate(settings)
+        .then(() => {
+          sendResponse({ success: true });
+        })
+        .catch((error) => {
+          /*
+           * Without this the promise rejection left sendResponse uncalled,
+           * the background saw a closed port, and the tab was recorded as
+           * not activated with no indication of why.
+           */
+          console.error('[VisionTranslate] Activation failed:', error);
+          sendResponse({ success: false, error: error?.message || String(error) });
+        });
       /* Return true because activate() is async */
       return true;
     }
