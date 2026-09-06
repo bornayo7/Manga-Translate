@@ -57,6 +57,19 @@ MyMemory quota exhaustion were reported as "no translated text"; plus a
 dozen smaller fixes and a documentation sweep. Backend tests 29 → 45,
 extension tests 16 → 48. Full table in `AUDIT.md`.
 
+### G. Branch integration verification 2026-09-06
+The review branch includes both the previous `main` (`b550dbc`) and
+`audit/deep-repair` (`6a11600`), so all branch work can be consolidated by
+fast-forward without conflict resolution or dropping commits.
+
+The pre-merge GitHub CI run `34017765526` exposed a website lockfile issue
+that the earlier local builds missed: npm 10.8.2 rejected `npm ci` because
+the optional `@emnapi/core` and `@emnapi/runtime` peer entries were missing.
+Regenerated the lockfile with that npm version; existing package versions
+are unchanged. Verified a Linux-targeted clean-install dry run, an actual
+clean install, website lint/typecheck/build, extension 48/48 tests and build,
+and backend 45 tests locally. Live OCR/provider checks remain outstanding.
+
 ## Success criteria
 
 1. Keep extension tests/build, website lint/typecheck/build, and backend tests green in CI.
