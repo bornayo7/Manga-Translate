@@ -2279,14 +2279,18 @@ function addTranslateIcons() {
       icon.dataset.translating = 'true';
       icon.innerHTML = '⟳';
       icon.style.opacity = '1';
-      icon.style.animation = 'spin 1s linear infinite';
+      icon.style.animation = `${CLASS_PREFIX}-spin 1s linear infinite`;
 
-      /* Add spin animation if not already present */
+      /*
+       * Add the spin animation if not already present. The keyframes are
+       * namespaced: a bare "@keyframes spin" injected into the host page
+       * would override any "spin" animation the page defines for itself.
+       */
       if (!document.getElementById(`${CLASS_PREFIX}-spin-style`)) {
         const style = document.createElement('style');
         style.id = `${CLASS_PREFIX}-spin-style`;
-        style.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
-        document.head.appendChild(style);
+        style.textContent = `@keyframes ${CLASS_PREFIX}-spin { to { transform: rotate(360deg); } }`;
+        (document.head || document.documentElement).appendChild(style);
       }
 
       try {
