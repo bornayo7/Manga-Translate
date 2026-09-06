@@ -66,3 +66,28 @@ test('selectMangaBboxes stops before the summed area exceeds the limit', () => {
 
   assert.deepEqual(boxes, [[0, 0, 5000, 5000], [0, 0, 5000, 5000]]);
 });
+
+import { toContentScriptBlocks } from '../shared/text.js';
+
+test('toContentScriptBlocks converts corner boxes and applies engine defaults', () => {
+  const blocks = toContentScriptBlocks(
+    [
+      { text: 'こんにちは', bbox: [10.4, 20, 30.6, 80] },
+      { text: '   ', bbox: [0, 0, 10, 10] },
+      { text: 'sure', bbox: [5, 5, 50, 15], confidence: 0.42, orientation: 'horizontal' },
+      { text: 42, bbox: 'nope', confidence: 'high', orientation: 'diagonal' }
+    ],
+    { defaultConfidence: 0.9, defaultOrientation: 'vertical' }
+  );
+
+  assert.deepEqual(blocks, [
+    { text: 'こんにちは', confidence: 0.9, bbox: { x: 10, y: 20, width: 21, height: 60 }, orientation: 'vertical' },
+    { text: 'sure', confidence: 0.42, bbox: { x: 5, y: 5, width: 45, height: 10 }, orientation: 'horizontal' },
+    { text: '42', confidence: 0.9, bbox: { x: 0, y: 0, width: 0, height: 0 }, orientation: 'vertical' }
+  ]);
+});
+
+test('toContentScriptBlocks tolerates a missing detections list', () => {
+  assert.deepEqual(toContentScriptBlocks(undefined), []);
+  assert.deepEqual(toContentScriptBlocks(null), []);
+});

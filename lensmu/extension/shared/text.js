@@ -119,3 +119,36 @@ export function selectMangaBboxes(detections = []) {
 
   return accepted;
 }
+
+// Converts backend/Tesseract detections ({ text, bbox: [x1, y1, x2, y2],
+// confidence?, orientation? }) into the { bbox: { x, y, width, height } }
+// blocks content.js and overlay.js work with. Engines that report no
+// confidence or orientation (MangaOCR) get the defaults the caller passes.
+export function toContentScriptBlocks(
+  blocks = [],
+  { defaultConfidence = 0, defaultOrientation = 'horizontal' } = {}
+) {
+  return (Array.isArray(blocks) ? blocks : [])
+    .map((block) => {
+      const bbox = Array.isArray(block?.bbox) ? block.bbox : [0, 0, 0, 0];
+      const [x1, y1, x2, y2] = bbox.map((value) => Math.round(Number(value) || 0));
+      const confidence = Number(block?.confidence);
+      const orientation =
+        block?.orientation === 'vertical' || block?.orientation === 'horizontal'
+          ? block.orientation
+          : defaultOrientation;
+
+      return {
+        text: typeof block?.text === 'string' ? block.text : String(block?.text || ''),
+        confidence: Number.isFinite(confidence) ? confidence : defaultConfidence,
+        bbox: {
+          x: x1,
+          y: y1,
+          width: Math.max(0, x2 - x1),
+          height: Math.max(0, y2 - y1)
+        },
+        orientation
+      };
+    })
+    .filter((block) => block.text.trim().length > 0);
+}

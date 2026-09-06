@@ -67,7 +67,13 @@ import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation 
 import { toContentScriptSettings } from './shared/preferences.js';
 import { fetchWithTimeout } from './shared/fetch-with-timeout.js';
 import { readResponseBytesWithLimit } from './shared/response-limits.js';
-import { describeHttpFailure, selectMangaBboxes, stripDataUrlPrefix, toErrorMessage } from './shared/text.js';
+import {
+  describeHttpFailure,
+  selectMangaBboxes,
+  stripDataUrlPrefix,
+  toContentScriptBlocks,
+  toErrorMessage
+} from './shared/text.js';
 
 /*
  * --------------------------------------------------------------------------
@@ -152,27 +158,6 @@ function normalizeOcrEngine(engine) {
     default:
       return 'tesseract';
   }
-}
-
-function toContentScriptBlocks(blocks = []) {
-  return blocks
-    .map((block) => {
-      const bbox = Array.isArray(block?.bbox) ? block.bbox : [0, 0, 0, 0];
-      const [x1, y1, x2, y2] = bbox.map((value) => Math.round(Number(value) || 0));
-
-      return {
-        text: typeof block?.text === 'string' ? block.text : String(block?.text || ''),
-        confidence: Number(block?.confidence) || 0,
-        bbox: {
-          x: x1,
-          y: y1,
-          width: Math.max(0, x2 - x1),
-          height: Math.max(0, y2 - y1)
-        },
-        orientation: block?.orientation === 'vertical' ? 'vertical' : 'horizontal'
-      };
-    })
-    .filter((block) => block.text.trim().length > 0);
 }
 
 function normalizeCustomOcrResponse(body, fallbackSourceLang = 'auto') {
@@ -750,15 +735,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               break;
             }
 
-            const data = response.body;
             ocrResult = {
-              blocks: (data.detections || []).map(d => ({
-                text: d.text,
-                confidence: d.confidence,
-                bbox: { x: d.bbox[0], y: d.bbox[1], width: d.bbox[2] - d.bbox[0], height: d.bbox[3] - d.bbox[1] },
-                orientation: d.orientation || 'horizontal'
-              })),
-              source_lang: payload.sourceLang
+              blocks: toContentScriptBlocks(response.body?.detections),
+              source_lang: payload.sourceLang || settings.sourceLanguage || 'auto'
             };
 
           } else if (engine === 'mangaocr') {
@@ -815,33 +794,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               break;
             }
 
-            const mangaBlocks = (mangaResponse.body.detections || [])
-              .map(d => ({
-                text: typeof d.text === 'string' ? d.text : String(d.text || ''),
-                confidence: Number(d.confidence) || 0.9,
-                bbox: {
-                  x: d.bbox[0],
-                  y: d.bbox[1],
-                  width: d.bbox[2] - d.bbox[0],
-                  height: d.bbox[3] - d.bbox[1]
-                },
-                orientation: d.orientation || 'vertical'
-              }))
-              .filter(block => block.text.trim().length > 0);
-
-            const fallbackBlocks = paddleDetections
-              .map(d => ({
-                text: typeof d.text === 'string' ? d.text : String(d.text || ''),
-                confidence: Number(d.confidence) || 0,
-                bbox: {
-                  x: d.bbox[0],
-                  y: d.bbox[1],
-                  width: d.bbox[2] - d.bbox[0],
-                  height: d.bbox[3] - d.bbox[1]
-                },
-                orientation: d.orientation || 'horizontal'
-              }))
-              .filter(block => block.text.trim().length > 0);
+            /*
+             * MangaOCR reports neither confidence nor orientation, so assume
+             * a confident, vertical read; fall back to PaddleOCR's own text
+             * (which has both) if MangaOCR recognized nothing.
+             */
+            const mangaBlocks = toContentScriptBlocks(mangaResponse.body?.detections, {
+              defaultConfidence: 0.9,
+              defaultOrientation: 'vertical'
+            });
+            const fallbackBlocks = toContentScriptBlocks(paddleDetections);
 
             ocrResult = {
               blocks: mangaBlocks.length > 0 ? mangaBlocks : fallbackBlocks,
