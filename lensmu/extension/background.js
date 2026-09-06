@@ -67,7 +67,7 @@ import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation 
 import { toContentScriptSettings } from './shared/preferences.js';
 import { fetchWithTimeout } from './shared/fetch-with-timeout.js';
 import { readResponseBytesWithLimit } from './shared/response-limits.js';
-import { stripDataUrlPrefix, toErrorMessage } from './shared/text.js';
+import { describeHttpFailure, stripDataUrlPrefix, toErrorMessage } from './shared/text.js';
 
 /*
  * --------------------------------------------------------------------------
@@ -435,14 +435,36 @@ async function proxyFetch(url, options = {}) {
     const response = await fetchWithTimeout(url, options, REQUEST_TIMEOUT_MS);
     const contentType = response.headers.get('content-type') || '';
     const body = contentType.includes('application/json')
-      ? await response.json()
+      ? await response.json().catch(() => null)
       : await response.text();
+    const headers = Object.fromEntries(response.headers.entries());
+
+    if (!response.ok) {
+      /*
+       * The content script only ever reads body.error, so fold whatever the
+       * server actually said (FastAPI uses "detail") into that field.
+       * Without this a 501 "PaddleOCR is not installed" or a 422
+       * "Unsupported PaddleOCR language" reached the user as the generic
+       * "OCR request failed."
+       */
+      const errorBody = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+      return {
+        ok: false,
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+        body: {
+          ...errorBody,
+          error: describeHttpFailure(response.status, response.statusText, body)
+        }
+      };
+    }
 
     return {
-      ok: response.ok,
+      ok: true,
       status: response.status,
       statusText: response.statusText,
-      headers: Object.fromEntries(response.headers.entries()),
+      headers,
       body
     };
   } catch (error) {
@@ -451,9 +473,24 @@ async function proxyFetch(url, options = {}) {
       status: 0,
       statusText: 'Network Error',
       headers: {},
-      body: { error: error.message }
+      body: { error: describeNetworkFailure(url, error) }
     };
   }
+}
+
+/*
+ * fetch() rejects with the famously unhelpful "Failed to fetch". Name the
+ * host that could not be reached so a stopped backend or a mistyped URL is
+ * obvious from the notice on the image.
+ */
+function describeNetworkFailure(url, error) {
+  let origin = String(url);
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    /* keep the raw string */
+  }
+  return `Could not reach ${origin}: ${toErrorMessage(error)}`;
 }
 
 /*

@@ -47,3 +47,39 @@ export function toErrorMessage(error, fallback = 'Unknown error') {
 
   return fallback;
 }
+
+// Turns a failed HTTP response into one sentence a user can act on. FastAPI
+// puts its message under "detail" (a string, or a list of field errors for
+// 422s); other services use "error" or "message"; some only send HTML. The
+// content script shows body.error verbatim, so this is what the user reads.
+export function describeHttpFailure(status, statusText, body) {
+  const fallback = `HTTP ${status}${statusText ? ` ${statusText}` : ''}`;
+
+  if (typeof body === 'string') {
+    const text = body.trim();
+    return text && text.length <= 200 && !text.startsWith('<') ? text : fallback;
+  }
+
+  if (!body || typeof body !== 'object') {
+    return fallback;
+  }
+
+  const detail = body.detail ?? body.error ?? body.message;
+
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail.trim();
+  }
+
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0];
+    const location = Array.isArray(first?.loc)
+      ? first.loc.filter((part) => part !== 'body').join('.')
+      : '';
+    const message = typeof first?.msg === 'string' ? first.msg.trim() : '';
+    if (message) {
+      return location ? `${location}: ${message}` : message;
+    }
+  }
+
+  return fallback;
+}
