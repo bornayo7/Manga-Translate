@@ -60,3 +60,18 @@ test('extractClaudeText skips thinking blocks and joins every text block', () =>
   assert.equal(extractClaudeText({ content: [{ type: 'thinking', thinking: '...' }] }), '');
   assert.equal(extractClaudeText({}), '');
 });
+
+import { estimateOutputTokens } from '../translate/llm-translate.js';
+
+test('estimateOutputTokens grows with the request and stays inside provider limits', () => {
+  assert.equal(estimateOutputTokens([]), 1024);
+  assert.equal(estimateOutputTokens(['こんにちは']), 1024);
+
+  const denseBubbles = Array.from({ length: 60 }, () => 'それは本当に大変なことだったんだよね');
+  const dense = estimateOutputTokens(denseBubbles);
+  assert.ok(dense > 2000, `dense page budget ${dense} should exceed the old fixed 2000`);
+  assert.ok(dense <= 8192);
+
+  const huge = estimateOutputTokens(Array.from({ length: 500 }, () => 'x'.repeat(200)));
+  assert.equal(huge, 8192);
+});
