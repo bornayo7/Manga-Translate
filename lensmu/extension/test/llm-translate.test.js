@@ -75,3 +75,32 @@ test('estimateOutputTokens grows with the request and stays inside provider limi
   const huge = estimateOutputTokens(Array.from({ length: 500 }, () => 'x'.repeat(200)));
   assert.equal(huge, 8192);
 });
+
+import { parseGeminiResponse } from '../translate/llm-translate.js';
+
+test('parseGeminiResponse joins text parts and skips thinking parts', () => {
+  const data = {
+    candidates: [{
+      content: { parts: [{ text: 'reasoning...', thought: true }, { text: '[1] Hello\n' }, { text: '[2] Bye' }] },
+      finishReason: 'STOP'
+    }]
+  };
+
+  assert.equal(parseGeminiResponse(data), '[1] Hello\n[2] Bye');
+});
+
+test('parseGeminiResponse names the reason when Gemini refuses or stops early', () => {
+  assert.throws(
+    () => parseGeminiResponse({ promptFeedback: { blockReason: 'SAFETY' }, candidates: [] }),
+    /refused the request \(SAFETY\)/
+  );
+  assert.throws(
+    () => parseGeminiResponse({ candidates: [{ content: { parts: [] }, finishReason: 'SAFETY' }] }),
+    /stopped without a translation \(SAFETY\)/
+  );
+  assert.throws(
+    () => parseGeminiResponse({ candidates: [{ content: { parts: [] }, finishReason: 'MAX_TOKENS' }] }),
+    /output limit/
+  );
+  assert.throws(() => parseGeminiResponse({}), /no candidates/);
+});
