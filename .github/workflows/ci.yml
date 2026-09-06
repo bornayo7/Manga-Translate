@@ -55,4 +55,4 @@ jobs:
           cache: pip
           cache-dependency-path: lensmu/backend/requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
-      - run: pytest test_server.py -v
+      - run: pytest -v

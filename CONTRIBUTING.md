@@ -61,7 +61,7 @@ The codebase is organized into three main parts.
 
 ## Making Changes
 
-**Backend changes:** Edit files in `lensmu/backend/`. The `--reload` flag on uvicorn will restart the server automatically. Run tests with `pytest test_server.py -v` before committing.
+**Backend changes:** Edit files in `lensmu/backend/`. The `--reload` flag on uvicorn will restart the server automatically. Run tests with `pytest -v` before committing.
 
 **Extension changes:** Edit source files in `lensmu/extension/src/` for popup components, or the root-level `.js` files for content scripts and background workers. The watcher will rebuild automatically, but you need to manually reload the extension in Chrome.
 
@@ -82,7 +82,7 @@ The codebase is organized into three main parts.
 ## Running Tests
 
 ```bash
-cd lensmu/backend && pip install -r requirements-dev.txt && pytest test_server.py -v
+cd lensmu/backend && pip install -r requirements-dev.txt && pytest -v
 cd ../extension && npm ci && npm test && npm run build
 cd ../website && npm ci && npm run lint && npm run typecheck && npm run build
 ```
