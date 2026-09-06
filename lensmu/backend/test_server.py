@@ -13,10 +13,59 @@
 import base64
 import pytest
 from fastapi.testclient import TestClient
+import security
 import server
 
 
 client = TestClient(server.app)
+
+
+def find_rate_limiter():
+    """Walk the built middleware stack to the live RateLimitMiddleware."""
+    layer = server.app.middleware_stack
+    while layer is not None:
+        if isinstance(layer, security.RateLimitMiddleware):
+            return layer
+        layer = getattr(layer, "app", None)
+    return None
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """Every test shares one TestClient IP, so drain the limiter between tests.
+
+    Without this the suite silently starts failing with 429s once it grows
+    past RATE_LIMIT_MAX_REQUESTS requests in a single process.
+    """
+    yield
+    limiter = find_rate_limiter()
+    if limiter is not None:
+        limiter.requests.clear()
+
+
+def install_fake_paddle(monkeypatch, process_image=None):
+    """Make /ocr/paddle reachable with a fake engine; returns the class."""
+
+    class FakePaddleEngine:
+        requested_language = None
+
+        @classmethod
+        def get_instance(cls, language):
+            cls.requested_language = language
+            return cls()
+
+        @classmethod
+        def get_loaded_languages(cls):
+            return []
+
+        def process_image(self, image_bytes):
+            if process_image is None:
+                return []
+            return process_image(image_bytes)
+
+    monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
+    monkeypatch.setattr(server, "PaddleOCREngine", FakePaddleEngine)
+    return FakePaddleEngine
 
 TINY_PNG = (
     b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
@@ -78,11 +127,55 @@ class TestPaddleOCRValidation:
         response = client.post("/ocr/paddle")
         assert response.status_code == 422
 
-    def test_invalid_base64(self):
-        """Request with invalid base64 should return 400 or 501."""
+    def test_invalid_base64_is_a_400(self, monkeypatch):
+        """With an engine installed, undecodable base64 is the client's fault."""
+        install_fake_paddle(monkeypatch)
         response = client.post("/ocr/paddle", json={"image": "not-valid-base64!!!"})
-        # 501 if PaddleOCR not installed, 400 if installed but bad image
-        assert response.status_code in [400, 501]
+        assert response.status_code == 400
+        assert "Invalid base64" in response.json()["detail"]
+
+    def test_missing_engine_is_a_501(self, monkeypatch):
+        """Without PaddleOCR installed the route reports 501, not a decode error."""
+        monkeypatch.setattr(server, "PADDLE_AVAILABLE", False)
+        response = client.post("/ocr/paddle", json={"image": "not-valid-base64!!!"})
+        assert response.status_code == 501
+
+    def test_unsupported_language_is_a_422(self, monkeypatch):
+        install_fake_paddle(monkeypatch)
+        response = client.post(
+            "/ocr/paddle",
+            json={"image": base64.b64encode(TINY_PNG).decode(), "lang": "klingon"},
+        )
+        assert response.status_code == 422
+        assert "Unsupported PaddleOCR language" in response.json()["detail"]
+
+    def test_oversized_decoded_image_is_a_413(self, monkeypatch):
+        install_fake_paddle(monkeypatch)
+        monkeypatch.setattr(security, "MAX_IMAGE_SIZE_BYTES", 16)
+        response = client.post(
+            "/ocr/paddle",
+            json={"image": base64.b64encode(TINY_PNG).decode()},
+        )
+        assert response.status_code == 413
+        assert "Image too large" in response.json()["detail"]
+
+    def test_engine_value_error_is_a_400_and_other_failures_a_500(self, monkeypatch):
+        def broken_image(_image_bytes):
+            raise ValueError("Could not decode image: bad header")
+
+        install_fake_paddle(monkeypatch, process_image=broken_image)
+        payload = {"image": base64.b64encode(TINY_PNG).decode(), "lang": "en"}
+        response = client.post("/ocr/paddle", json=payload)
+        assert response.status_code == 400
+        assert "Could not decode image" in response.json()["detail"]
+
+        def crashed_engine(_image_bytes):
+            raise RuntimeError("CUDA out of memory")
+
+        install_fake_paddle(monkeypatch, process_image=crashed_engine)
+        response = client.post("/ocr/paddle", json=payload)
+        assert response.status_code == 500
+        assert "OCR processing failed" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +189,14 @@ class TestMangaOCRValidation:
         """Request without required fields should return 422."""
         response = client.post("/ocr/manga", json={})
         assert response.status_code == 422
+
+    def test_missing_engine_is_a_501(self, monkeypatch):
+        monkeypatch.setattr(server, "MANGA_AVAILABLE", False)
+        response = client.post(
+            "/ocr/manga",
+            json={"image": base64.b64encode(TINY_PNG).decode(), "bboxes": [[0, 0, 1, 1]]},
+        )
+        assert response.status_code == 501
 
     def test_missing_bboxes(self):
         """Request with image but no bboxes should return 422."""
@@ -249,6 +350,44 @@ class TestRequestLimits:
         )
         assert response.status_code == 413
         assert response.json()["code"] == "request_too_large"
+
+    def test_oversized_streamed_body_is_rejected(self):
+        """A body that omits Content-Length is still capped while streaming."""
+        oversized = b"x" * (security.MAX_REQUEST_BODY_BYTES + 1)
+        response = client.post(
+            "/ocr/paddle",
+            content=iter([oversized[: 1024 * 1024], oversized[1024 * 1024 :]]),
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 413
+        assert response.json()["code"] == "request_too_large"
+
+
+class TestRateLimit:
+    def test_limit_is_enforced_per_client_with_retry_after(self, monkeypatch):
+        # The middleware stack is built lazily, so make one request first.
+        client.post("/ocr/paddle", json={})
+        limiter = find_rate_limiter()
+        assert limiter is not None
+
+        limiter.requests.clear()
+        monkeypatch.setattr(limiter, "max_requests", 2)
+
+        assert client.post("/ocr/paddle", json={}).status_code == 422
+        assert client.post("/ocr/paddle", json={}).status_code == 422
+
+        blocked = client.post("/ocr/paddle", json={})
+        assert blocked.status_code == 429
+        assert blocked.headers["Retry-After"] == str(limiter.window_seconds)
+
+        # /health is exempt so monitoring keeps working under load.
+        assert client.get("/health").status_code == 200
+
+    def test_security_headers_are_present(self):
+        response = client.get("/health")
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
 
 
 # ---------------------------------------------------------------------------
