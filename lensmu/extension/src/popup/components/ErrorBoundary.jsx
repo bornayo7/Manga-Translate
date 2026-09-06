@@ -24,6 +24,7 @@
  */
 
 import React from 'react';
+import { SETTINGS_STORAGE_KEY, SETTING_KEYS } from '../../../shared/preferences.js';
 
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -48,7 +49,13 @@ export default class ErrorBoundary extends React.Component {
 
   handleClearSettings = async () => {
     try {
-      await chrome.storage.local.clear();
+      /*
+       * Reset the settings object (plus any pre-migration top-level keys)
+       * and nothing else. A blanket chrome.storage.local.clear() also
+       * threw away the Auth0 session, the per-domain disable list and the
+       * read-aloud audio cache, none of which can crash the popup.
+       */
+      await chrome.storage.local.remove([SETTINGS_STORAGE_KEY, ...SETTING_KEYS]);
       this.setState({ hasError: false, error: null });
       window.location.reload();
     } catch (e) {
