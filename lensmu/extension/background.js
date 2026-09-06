@@ -1143,6 +1143,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           persistTabStates();
           sendResponse({ success: true });
+        } else {
+          /*
+           * Every branch must answer: the listener returns true, so an
+           * unanswered message leaves the sender's promise pending until
+           * the worker is torn down.
+           */
+          sendResponse({ success: false, error: 'UPDATE_PROGRESS must come from a content script.' });
         }
         break;
       }
