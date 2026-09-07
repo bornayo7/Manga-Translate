@@ -8,6 +8,7 @@ import ReadAloudSettings from "./components/ReadAloudSettings.jsx";
 import {
   DEFAULT_EXTENSION_SETTINGS,
   SETTINGS_STORAGE_KEY,
+  SETTING_RANGES,
   clampNumber,
   mergeWithDefaults,
 } from "../../shared/preferences.js";
@@ -51,11 +52,12 @@ function normalizeLoadedSettings(rawSettings = {}) {
    * llmModel is one setting shared by every provider, and providers retire
    * IDs over time. Resolve to what the request will actually send so the
    * picker shows the truth and the autosave persists the migration.
+   * (Providers without a model rule get the stored value back unchanged.)
    */
-  const provider = nextSettings.translationProvider;
-  if (DEFAULT_LLM_MODELS[provider]) {
-    nextSettings.llmModel = resolveProviderModel(provider, nextSettings.llmModel);
-  }
+  nextSettings.llmModel = resolveProviderModel(
+    nextSettings.translationProvider,
+    nextSettings.llmModel
+  );
 
   return nextSettings;
 }
@@ -161,53 +163,33 @@ function ToggleRow({
 }
 
 /*
- * A number input that only commits complete, in-range values.
+ * A number input that commits only a complete, in-range value, and only
+ * when the user is done with it (blur or Enter).
  *
  * Binding <input type="number"> straight to settings meant that clearing
  * the field to retype it stored Number("") === 0, the 180 ms autosave
  * shipped that 0 to every active tab, and content.js promptly decorated
  * every 1px tracking pixel on the page with a translate icon - icons that
- * stayed once the real value was typed. Now the draft lives here until it
- * parses inside [min, max]; on blur it is clamped, and an empty field
- * simply reverts.
+ * stayed once the real value was typed. The input is uncontrolled while it
+ * has focus; on blur the text is parsed and clamped, an empty or unparseable
+ * field reverts, and an unchanged value does not trigger a save. The key
+ * remounts the input whenever the committed value changes from outside.
  */
 function NumberField({ id, label, value, min, max, onCommit }) {
-  const [draft, setDraft] = useState(String(value));
-  const [editing, setEditing] = useState(false);
+  function commit(input) {
+    const raw = input.value.trim();
+    const parsed = Number(raw);
 
-  useEffect(() => {
-    if (!editing) {
-      setDraft(String(value));
-    }
-  }, [value, editing]);
-
-  function parseDraft(rawValue) {
-    const parsed = Number(rawValue);
-    return rawValue.trim() !== "" && Number.isFinite(parsed) ? parsed : null;
-  }
-
-  function handleChange(event) {
-    const next = event.target.value;
-    setDraft(next);
-
-    const parsed = parseDraft(next);
-    if (parsed !== null && parsed >= min && parsed <= max) {
-      onCommit(Math.round(parsed));
-    }
-  }
-
-  function handleBlur() {
-    const parsed = parseDraft(draft);
-    setEditing(false);
-
-    if (parsed === null) {
-      setDraft(String(value));
+    if (raw === "" || !Number.isFinite(parsed)) {
+      input.value = String(value);
       return;
     }
 
     const committed = Math.round(clampNumber(parsed, min, max, value));
-    setDraft(String(committed));
-    onCommit(committed);
+    input.value = String(committed);
+    if (committed !== value) {
+      onCommit(committed);
+    }
   }
 
   return (
@@ -216,16 +198,15 @@ function NumberField({ id, label, value, min, max, onCommit }) {
         {label}
       </label>
       <input
+        key={value}
         id={id}
         className="form-input"
         type="number"
         min={min}
         max={max}
         step="1"
-        value={draft}
-        onFocus={() => setEditing(true)}
-        onChange={handleChange}
-        onBlur={handleBlur}
+        defaultValue={value}
+        onBlur={(event) => commit(event.currentTarget)}
         onKeyDown={(event) => {
           if (event.key === "Enter") {
             event.currentTarget.blur();
@@ -1029,8 +1010,8 @@ export default function App() {
                 <NumberField
                   id="min-image-width"
                   label="Minimum width"
-                  min={32}
-                  max={4096}
+                  min={SETTING_RANGES.minImageWidth.min}
+                  max={SETTING_RANGES.minImageWidth.max}
                   value={settings.minImageWidth}
                   onCommit={(value) => updateSetting("minImageWidth", value)}
                 />
@@ -1038,8 +1019,8 @@ export default function App() {
                 <NumberField
                   id="min-image-height"
                   label="Minimum height"
-                  min={32}
-                  max={4096}
+                  min={SETTING_RANGES.minImageHeight.min}
+                  max={SETTING_RANGES.minImageHeight.max}
                   value={settings.minImageHeight}
                   onCommit={(value) => updateSetting("minImageHeight", value)}
                 />
@@ -1047,8 +1028,8 @@ export default function App() {
                 <NumberField
                   id="max-concurrent-images"
                   label="Parallel images"
-                  min={1}
-                  max={12}
+                  min={SETTING_RANGES.maxConcurrentImages.min}
+                  max={SETTING_RANGES.maxConcurrentImages.max}
                   value={settings.maxConcurrentImages}
                   onCommit={(value) => updateSetting("maxConcurrentImages", value)}
                 />
