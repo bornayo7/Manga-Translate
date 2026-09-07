@@ -447,7 +447,7 @@ export function parseGeminiResponse(data) {
   const text = (candidate.content?.parts || [])
     .filter((part) => typeof part?.text === 'string' && !part.thought)
     .map((part) => part.text)
-    .join('');
+    .join('\n');
   const finishReason = candidate.finishReason || 'STOP';
 
   if (!text && finishReason === 'MAX_TOKENS') {
@@ -524,12 +524,17 @@ async function callCustom(userMessage, apiKey, model, baseUrl, maxOutputTokens) 
 }
 
 /*
- * A line that starts a new numbered entry: "[1] text", "1. text", "1) text",
- * "[1]text", optionally wrapped in markdown bold. The number and the rest of
- * the line are captured. A colon is deliberately not a delimiter so a
- * continuation line such as "1:30 PM" is never mistaken for a marker.
+ * Lines that start a new numbered entry, optionally wrapped in markdown
+ * bold. The prompt asks for "[N] text", so whenever a response contains a
+ * bracketed marker at all, only bracketed markers open entries; that keeps
+ * a numbered list *inside* a translation ("1. No shouting") as content.
+ * The plain form ("1. text", "1) text") is accepted only for responses
+ * that never use brackets, and it requires whitespace (or end of line)
+ * after the delimiter so a decimal such as "3.50 dollars" is not a marker.
+ * A colon is never a delimiter, so "1:30 PM" is not one either.
  */
-const NUMBERED_MARKER_PATTERN = /^\s*(?:\*\*)?\[?\s*(\d+)\s*[\].)]\s*(?:\*\*)?\s*(.*)$/;
+const BRACKET_MARKER_PATTERN = /^\s*(?:\*\*)?\[\s*(\d+)\s*\]\s*(?:\*\*)?\s*(.*)$/;
+const PLAIN_MARKER_PATTERN = /^\s*(?:\*\*)?(\d+)\s*[.)](?:\s+|\s*\*\*\s*|$)(.*)$/;
 
 /**
  * Parse a numbered response from the LLM into an array of translations.
@@ -556,6 +561,9 @@ const NUMBERED_MARKER_PATTERN = /^\s*(?:\*\*)?\[?\s*(\d+)\s*[\].)]\s*(?:\*\*)?\s
  */
 export function parseNumberedResponse(responseText, expectedCount) {
   const lines = String(responseText || '').replace(/\r\n?/g, '\n').split('\n');
+  const markerPattern = lines.some((line) => BRACKET_MARKER_PATTERN.test(line))
+    ? BRACKET_MARKER_PATTERN
+    : PLAIN_MARKER_PATTERN;
   const entries = new Map();
   let currentIndex = -1;
   let currentLines = [];
@@ -569,7 +577,7 @@ export function parseNumberedResponse(responseText, expectedCount) {
   };
 
   for (const line of lines) {
-    const match = line.match(NUMBERED_MARKER_PATTERN);
+    const match = line.match(markerPattern);
     const marker = match ? parseInt(match[1], 10) : 0;
 
     if (match && marker > lastMarker && marker <= expectedCount) {

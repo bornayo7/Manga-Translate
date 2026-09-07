@@ -15,11 +15,15 @@ test('parseNumberedResponse keeps multi-line translations together', () => {
   assert.deepEqual(parseNumberedResponse('[1] Hello\nthere\n[2] World', 2), ['Hello\nthere', 'World']);
 });
 
-test('parseNumberedResponse ignores a preamble and accepts dot, paren and bold markers', () => {
+test('parseNumberedResponse ignores a preamble and accepts dot and paren markers', () => {
   assert.deepEqual(
-    parseNumberedResponse('Sure! Here are the translations:\n\n1. Hello\n2) World\n**[3]** Again', 3),
+    parseNumberedResponse('Sure! Here are the translations:\n\n1. Hello\n2) World\n3. Again', 3),
     ['Hello', 'World', 'Again']
   );
+});
+
+test('parseNumberedResponse accepts markdown-bold bracket markers', () => {
+  assert.deepEqual(parseNumberedResponse('**[1]** Hello\n**[2]** World', 2), ['Hello', 'World']);
 });
 
 test('parseNumberedResponse leaves a skipped entry empty instead of shifting the rest', () => {
@@ -78,15 +82,16 @@ test('estimateOutputTokens grows with the request and stays inside provider limi
 
 import { parseGeminiResponse } from '../translate/llm-translate.js';
 
-test('parseGeminiResponse joins text parts and skips thinking parts', () => {
+test('parseGeminiResponse joins text parts on their own lines and skips thinking parts', () => {
   const data = {
     candidates: [{
-      content: { parts: [{ text: 'reasoning...', thought: true }, { text: '[1] Hello\n' }, { text: '[2] Bye' }] },
+      content: { parts: [{ text: 'reasoning...', thought: true }, { text: '[1] Hello' }, { text: '[2] Bye' }] },
       finishReason: 'STOP'
     }]
   };
 
   assert.equal(parseGeminiResponse(data), '[1] Hello\n[2] Bye');
+  assert.deepEqual(parseNumberedResponse(parseGeminiResponse(data), 2), ['Hello', 'Bye']);
 });
 
 test('parseGeminiResponse names the reason when Gemini refuses or stops early', () => {
@@ -103,4 +108,20 @@ test('parseGeminiResponse names the reason when Gemini refuses or stops early', 
     /output limit/
   );
   assert.throws(() => parseGeminiResponse({}), /no candidates/);
+});
+
+test('parseNumberedResponse keeps a numbered list inside a bracketed entry as content', () => {
+  assert.deepEqual(
+    parseNumberedResponse('[1] Rules:\n1. No shouting\n2. No running\n[2] Fine, got it.', 2),
+    ['Rules:\n1. No shouting\n2. No running', 'Fine, got it.']
+  );
+});
+
+test('parseNumberedResponse does not read a decimal or an unspaced number as a marker', () => {
+  assert.deepEqual(
+    parseNumberedResponse('1. The price is\n3.50 dollars each\n2. Deal', 2),
+    ['The price is\n3.50 dollars each', 'Deal']
+  );
+  assert.deepEqual(parseNumberedResponse('[1] Chapter\n2.Return\n[2] End', 2), ['Chapter\n2.Return', 'End']);
+  assert.deepEqual(parseNumberedResponse('**1.** Hello\n**2.** World', 2), ['Hello', 'World']);
 });
