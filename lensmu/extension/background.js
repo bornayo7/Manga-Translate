@@ -420,10 +420,30 @@ async function proxyFetch(url, options = {}) {
   try {
     const response = await fetchWithTimeout(url, options, REQUEST_TIMEOUT_MS);
     const contentType = response.headers.get('content-type') || '';
-    const body = contentType.includes('application/json')
-      ? await response.json().catch(() => null)
+    const isJson = contentType.includes('application/json');
+    /*
+     * JSON.parse can never yield undefined, so undefined is a safe sentinel
+     * for "the server said JSON and then sent something that is not".
+     */
+    const body = isJson
+      ? await response.json().catch(() => undefined)
       : await response.text();
     const headers = Object.fromEntries(response.headers.entries());
+
+    if (response.ok && isJson && body === undefined) {
+      /*
+       * A 2xx with an unparseable body must not pass as "no detections":
+       * the paddleocr branch would read body?.detections and report an
+       * empty page instead of a broken server.
+       */
+      return {
+        ok: false,
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+        body: { error: `${describeOrigin(url)} returned malformed JSON (HTTP ${response.status}).` }
+      };
+    }
 
     if (!response.ok) {
       /*
@@ -470,13 +490,15 @@ async function proxyFetch(url, options = {}) {
  * obvious from the notice on the image.
  */
 function describeNetworkFailure(url, error) {
-  let origin = String(url);
+  return `Could not reach ${describeOrigin(url)}: ${toErrorMessage(error)}`;
+}
+
+function describeOrigin(url) {
   try {
-    origin = new URL(url).origin;
+    return new URL(url).origin;
   } catch {
-    /* keep the raw string */
+    return String(url);
   }
-  return `Could not reach ${origin}: ${toErrorMessage(error)}`;
 }
 
 /*
