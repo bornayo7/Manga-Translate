@@ -11,23 +11,36 @@
 # =============================================================================
 
 import base64
+import pathlib
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 import security
 import server
 
+from conftest import TINY_PNG
+
 
 client = TestClient(server.app)
 
 
-def find_rate_limiter():
-    """Walk the built middleware stack to the live RateLimitMiddleware."""
+def find_middleware(middleware_class):
+    """Walk the built middleware stack to the live instance of a class.
+
+    The stack is built lazily on the first request, so callers must have
+    sent one request before asking.
+    """
     layer = server.app.middleware_stack
     while layer is not None:
-        if isinstance(layer, security.RateLimitMiddleware):
+        if isinstance(layer, middleware_class):
             return layer
         layer = getattr(layer, "app", None)
     return None
+
+
+def find_rate_limiter():
+    return find_middleware(security.RateLimitMiddleware)
 
 
 @pytest.fixture(autouse=True)
@@ -66,13 +79,6 @@ def install_fake_paddle(monkeypatch, process_image=None):
     monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
     monkeypatch.setattr(server, "PaddleOCREngine", FakePaddleEngine)
     return FakePaddleEngine
-
-TINY_PNG = (
-    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
-    b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00'
-    b'\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00'
-    b'\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
-)
 
 
 # ---------------------------------------------------------------------------
@@ -272,29 +278,16 @@ class TestPaddleLanguageContract:
         assert error.value.status_code == 422
 
     def test_mocked_paddle_response_and_language_routing(self, monkeypatch):
-        class FakePaddleEngine:
-            requested_language = None
+        def recognise(image_bytes):
+            assert image_bytes == TINY_PNG
+            return [{
+                "text": "hola",
+                "bbox": [1, 2, 11, 12],
+                "confidence": 0.95,
+                "orientation": "horizontal",
+            }]
 
-            @classmethod
-            def get_instance(cls, language):
-                cls.requested_language = language
-                return cls()
-
-            @classmethod
-            def get_loaded_languages(cls):
-                return []
-
-            def process_image(self, image_bytes):
-                assert image_bytes == TINY_PNG
-                return [{
-                    "text": "hola",
-                    "bbox": [1, 2, 11, 12],
-                    "confidence": 0.95,
-                    "orientation": "horizontal",
-                }]
-
-        monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
-        monkeypatch.setattr(server, "PaddleOCREngine", FakePaddleEngine)
+        FakePaddleEngine = install_fake_paddle(monkeypatch, process_image=recognise)
         response = client.post(
             "/ocr/paddle",
             json={"image": base64.b64encode(TINY_PNG).decode(), "lang": "es"},
@@ -351,16 +344,38 @@ class TestRequestLimits:
         assert response.status_code == 413
         assert response.json()["code"] == "request_too_large"
 
-    def test_oversized_streamed_body_is_rejected(self):
+    def test_oversized_streamed_body_is_rejected(self, monkeypatch):
         """A body that omits Content-Length is still capped while streaming."""
-        oversized = b"x" * (security.MAX_REQUEST_BODY_BYTES + 1)
+        client.get("/health")  # build the middleware stack
+        body_limit = find_middleware(security.RequestBodyLimitMiddleware)
+        assert body_limit is not None
+        monkeypatch.setattr(body_limit, "max_body_bytes", 64)
+
         response = client.post(
             "/ocr/paddle",
-            content=iter([oversized[: 1024 * 1024], oversized[1024 * 1024 :]]),
+            content=iter([b"x" * 40, b"x" * 40]),
             headers={"Content-Type": "application/json"},
         )
         assert response.status_code == 413
         assert response.json()["code"] == "request_too_large"
+
+    def test_manga_limits_match_the_extension_copy(self):
+        """selectMangaBboxes() in the extension mirrors this validator's limits.
+
+        The two live in different languages, so keep them from drifting the
+        cheap way: read the extension's constants and compare.
+        """
+        text_js = pathlib.Path(__file__).resolve().parents[1] / "extension" / "shared" / "text.js"
+        source = text_js.read_text(encoding="utf-8")
+
+        def js_constant(name):
+            match = re.search(rf"export const {name} = (\d+);", source)
+            assert match, f"{name} not found in {text_js}"
+            return int(match.group(1))
+
+        assert js_constant("MAX_MANGA_REGIONS") == server.MAX_MANGA_REGIONS
+        assert js_constant("MAX_MANGA_COORDINATE") == server.MAX_MANGA_COORDINATE
+        assert js_constant("MAX_MANGA_TOTAL_REGION_PIXELS") == server.MAX_MANGA_TOTAL_REGION_PIXELS
 
 
 class TestRateLimit:

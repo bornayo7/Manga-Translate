@@ -11,32 +11,27 @@
 # =============================================================================
 
 import importlib
-import io
 import sys
 import threading
-import time
 import types
 
 import pytest
-from PIL import Image
 
-
-def make_png(width: int = 4, height: int = 4) -> bytes:
-    """Return a small, genuinely decodable PNG for process_image() tests."""
-    buffer = io.BytesIO()
-    Image.new("RGB", (width, height), (255, 255, 255)).save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-TINY_PNG = make_png()
+from conftest import TINY_PNG
 
 
 class FakePaddleOCR:
-    """Minimal stand-in for paddleocr.PaddleOCR (3.x constructor names)."""
+    """Minimal stand-in for paddleocr.PaddleOCR (3.x constructor names).
+
+    Construction blocks on `load_release` (set by default) and signals
+    `load_started`, so a test can hold a "model load" open for exactly as
+    long as it needs without sleeping.
+    """
 
     instances: list = []
-    init_delay = 0.0
     predict_result: list = []
+    load_started = threading.Event()
+    load_release = threading.Event()
 
     def __init__(
         self,
@@ -51,19 +46,31 @@ class FakePaddleOCR:
             "text_det_thresh": text_det_thresh,
             "text_det_unclip_ratio": text_det_unclip_ratio,
         }
-        time.sleep(type(self).init_delay)
+        type(self).load_started.set()
+        assert type(self).load_release.wait(timeout=5), "test never released the fake model load"
         type(self).instances.append(self)
 
     def predict(self, image_array):
         return type(self).predict_result
 
 
+def run_with_timeout(function, timeout: float):
+    """Run `function` on a thread; return (finished, result)."""
+    result = []
+    worker = threading.Thread(target=lambda: result.append(function()), daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return (not worker.is_alive(), result[0] if result else None)
+
+
 @pytest.fixture
 def paddle_module(monkeypatch):
     """Import ocr_engines.paddle_ocr against the stub paddleocr package."""
     FakePaddleOCR.instances = []
-    FakePaddleOCR.init_delay = 0.0
     FakePaddleOCR.predict_result = []
+    FakePaddleOCR.load_started = threading.Event()
+    FakePaddleOCR.load_release = threading.Event()
+    FakePaddleOCR.load_release.set()
 
     fake_package = types.ModuleType("paddleocr")
     fake_package.PaddleOCR = FakePaddleOCR
@@ -111,32 +118,36 @@ def test_instances_are_cached_per_language_and_evicted_lru(paddle_module):
 
 def test_loaded_language_lookup_does_not_wait_for_a_model_load(paddle_module):
     engine = paddle_module.PaddleOCREngine
-    FakePaddleOCR.init_delay = 1.0
+    FakePaddleOCR.load_release.clear()
 
-    loader = threading.Thread(target=engine.get_instance, args=("japan",))
+    loader = threading.Thread(target=engine.get_instance, args=("japan",), daemon=True)
     loader.start()
-    time.sleep(0.1)
+    assert FakePaddleOCR.load_started.wait(timeout=5), "model load never started"
 
-    started = time.perf_counter()
-    languages_during_load = engine.get_loaded_languages()
-    waited = time.perf_counter() - started
+    # The model is now "loading". /health calls this on the event loop, so it
+    # must return immediately rather than queue behind the load.
+    finished, languages_during_load = run_with_timeout(engine.get_loaded_languages, timeout=1.0)
 
-    loader.join()
+    FakePaddleOCR.load_release.set()
+    loader.join(timeout=5)
 
+    assert finished, "get_loaded_languages() blocked behind a model load"
     assert languages_during_load == []
-    assert waited < 0.5, f"/health-style lookup blocked for {waited:.2f}s during model load"
     assert engine.get_loaded_languages() == ["japan"]
 
 
 def test_concurrent_requests_build_one_model(paddle_module):
     engine = paddle_module.PaddleOCREngine
-    FakePaddleOCR.init_delay = 0.2
+    FakePaddleOCR.load_release.clear()
 
-    threads = [threading.Thread(target=engine.get_instance, args=("japan",)) for _ in range(4)]
+    threads = [threading.Thread(target=engine.get_instance, args=("japan",), daemon=True) for _ in range(4)]
     for thread in threads:
         thread.start()
+    assert FakePaddleOCR.load_started.wait(timeout=5)
+
+    FakePaddleOCR.load_release.set()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=5)
 
     assert len(FakePaddleOCR.instances) == 1
 
