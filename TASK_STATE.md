@@ -70,6 +70,19 @@ are unchanged. Verified a Linux-targeted clean-install dry run, an actual
 clean install, website lint/typecheck/build, extension 48/48 tests and build,
 and backend 45 tests locally. Live OCR/provider checks remain outstanding.
 
+### H. Review of the review pass 2026-09-07
+The merged 29-commit diff was reviewed from ten angles with every candidate
+verified against the code, then swept for gaps: 22 candidates, 20 confirmed,
+2 refuted. Eleven follow-up commits on `main` (table in the 2026-09-07
+subsection of `AUDIT.md`): a 2xx with malformed JSON no longer reads as an
+empty page; an empty LLM reply now throws for every provider so the opt-in
+fallback engages; the response parser no longer mistakes list items or
+decimals for markers; the website demo shares the extension's MyMemory
+handling, box filter and error formatting; pydantic prefixes are stripped
+from notices; numeric settings are range-clamped and base URLs normalised on
+merge; plus test-suite speedups and de-duplication. Extension tests 48 → 56,
+backend 45 → 46. All suites green.
+
 ## Success criteria
 
 1. Keep extension tests/build, website lint/typecheck/build, and backend tests green in CI.

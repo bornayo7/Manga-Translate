@@ -53,6 +53,38 @@ LLM model lists against the providers' live documentation. 29 commits on
 so CI now covers `paddle_ocr.py` for the first time). `website`: `eslint .`,
 `tsc --noEmit`, `next build` clean.
 
+### Review of this pass — 2026-09-07
+
+After PR #1 merged, the 29-commit diff went through a ten-angle review
+(line-by-line, removed behaviour, cross-file tracing, language pitfalls,
+wrapper correctness, reuse, simplification, efficiency, altitude,
+conventions), each candidate verified against the code, then a gap sweep:
+22 candidates, 20 confirmed, 2 refuted. Eleven follow-up commits on `main`.
+
+| Severity | File | Finding |
+|---|---|---|
+| major | `extension/background.js` | `proxyFetch()`'s new `.catch(() => null)` turned a 2xx with malformed JSON into `ok: true, body: null`, which the PaddleOCR branch reported as "no text found". `undefined` is now the parse-failure sentinel and the case is an error naming the origin. |
+| major | `extension/translate/llm-translate.js` | OpenAI, Claude and custom endpoints returned `''` when the model produced no text (a thinking model that spends its whole budget), so the opt-in MyMemory fallback — which runs only from a thrown error — never engaged for them, while Gemini's path threw. `requireResponseText()` throws with the stop reason for all four. |
+| major | `extension/translate/llm-translate.js` | The line parser still shifted bubbles in two cases: a numbered list inside a bracketed entry ("1. No shouting") opened the next entry, and a decimal at line start ("3.50 dollars") read as marker 3. Brackets win whenever the response uses them; the plain form needs whitespace after the delimiter. Gemini text parts are joined on their own lines. |
+| major | `website/lib/translator.ts` | The demo hand-copied the MyMemory handling and had already drifted (no `quotaFinished` check), and its MangaOCR path still posted every box unfiltered, so a dense page failed whole with "Backend error 422". Now shares `shared/mymemory.js` (new) and `selectMangaBboxes()` / `describeHttpFailure()` from `shared/text.js`, with `.d.ts` files for the TypeScript build. |
+| minor | `extension/shared/text.js` | `describeHttpFailure()` leaked pydantic's "Value error, " prefix into the on-page notice (its test asserted a 422 shape the backend never emits — the verifier captured the real one from the TestClient), ignored a plain list of strings, and let an empty `detail` shadow a populated `error`. |
+| minor | `extension/shared/preferences.js` | `coerceSettingValue()` typed but never range-clamped, so a `minImageWidth` of 0 or 1 from any writer other than the popup still flooded pages with icons. `SETTING_RANGES` clamps at the merge boundary; the popup fields and the website schema use the same numbers; the two base URLs are normalised there too. |
+| minor | `extension/content.js` | The cross-origin fallback drew the full image to a canvas even with no `crossorigin` attribute, where tainting is certain. Skipped. |
+| minor | `extension/src/popup/App.jsx` | `NumberField` kept a draft/editing state machine and saved on every blur; now an uncontrolled input committed on blur/Enter, only when the value changed. |
+| minor | `extension/shared/llm-models.js`, `translate-manager.js` | The retirement table was exported only for its test; a re-export existed for one import line. Both gone; the header records that Sonnet 4.5/4.6 and Opus 4.5–4.8 are still served and pass through. |
+| minor | `backend/test_paddle_ocr.py`, `test_server.py`, `conftest.py` (new) | Lock tests slept 1.3 s and time-asserted; the body-cap test allocated 15 MB; a fake engine and a non-decodable "PNG" were duplicated. Event-driven, a 64-byte cap, one shared fake and one Pillow-generated image; a contract test asserts the MangaOCR limits in `shared/text.js` match `server.py`. |
+
+Refuted and left as is: replacing the request-sized LLM output budget with a
+flat 8192 (the budget is what bounds thinking on reasoning models), and
+making the backend silently skip bad MangaOCR boxes (strict 422 validation is
+the documented, tested contract; the client-side mirror is the right layer).
+A claim that `claude-sonnet-4-5-20250929` should be treated as retired was
+wrong: Anthropic still serves it as a legacy model.
+
+Verified on the result: `extension` `npm test` 56/56 and `npm run build`;
+`backend` `pytest -v` 46 passed; `website` `eslint .`, `tsc --noEmit`,
+`next build` clean.
+
 ### Still open
 
 Everything in the 2026-09-01 list below still stands (Firefox, Docker unverified,
