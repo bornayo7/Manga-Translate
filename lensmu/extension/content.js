@@ -1595,10 +1595,12 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       /*
        * The background fetch is cookieless, so an image behind a login
        * comes back 401/403 even though the page itself displays it. If the
-       * host also serves CORS headers (crossorigin="anonymous" images, most
-       * CDNs), the pixels can still be read straight off the element.
+       * page loaded it with a crossorigin attribute and the host answered
+       * with CORS headers, the pixels can still be read straight off the
+       * element. Without the attribute the canvas is tainted for certain,
+       * so skip the full-resolution draw that would only throw.
        */
-      if (!imageBase64 && type === 'img') {
+      if (!imageBase64 && type === 'img' && element.crossOrigin) {
         imageBase64 = imageToBase64(element);
       }
     } else if (type === 'background') {
