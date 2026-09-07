@@ -64,7 +64,13 @@ export function describeHttpFailure(status, statusText, body) {
     return fallback;
   }
 
-  const detail = body.detail ?? body.error ?? body.message;
+  // First field that actually carries something: an empty "detail" next to
+  // a populated "error" must not win just because '' is not nullish.
+  const detail = [body.detail, body.error, body.message].find(
+    (candidate) =>
+      (typeof candidate === 'string' && candidate.trim() !== '') ||
+      (Array.isArray(candidate) && candidate.length > 0)
+  );
 
   if (typeof detail === 'string' && detail.trim()) {
     return detail.trim();
@@ -72,16 +78,31 @@ export function describeHttpFailure(status, statusText, body) {
 
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0];
+
+    // Some services answer with a plain list of messages.
+    if (typeof first === 'string' && first.trim()) {
+      return first.trim();
+    }
+
+    // pydantic v2 field errors: { loc: ['body', 'bboxes'], msg: 'Value error, ...' }.
     const location = Array.isArray(first?.loc)
       ? first.loc.filter((part) => part !== 'body').join('.')
       : '';
-    const message = typeof first?.msg === 'string' ? first.msg.trim() : '';
+    const message = typeof first?.msg === 'string' ? stripPydanticPrefix(first.msg) : '';
     if (message) {
       return location ? `${location}: ${message}` : message;
     }
   }
 
   return fallback;
+}
+
+// pydantic v2 prefixes a validator's own ValueError/AssertionError text
+// with "Value error, " / "Assertion failed, "; that is noise on a notice.
+function stripPydanticPrefix(message) {
+  return String(message)
+    .replace(/^(?:Value error|Assertion failed),\s*/i, '')
+    .trim();
 }
 
 // The backend's /ocr/manga validator rejects the *whole* request if any box

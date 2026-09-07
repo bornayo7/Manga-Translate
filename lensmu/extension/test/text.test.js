@@ -10,12 +10,36 @@ test('describeHttpFailure prefers the FastAPI detail string', () => {
   );
 });
 
-test('describeHttpFailure flattens a pydantic field error', () => {
-  const body = {
-    detail: [{ loc: ['body', 'bboxes', 0], msg: 'bbox 0 must satisfy x2 > x1 and y2 > y1', type: 'value_error' }]
+test('describeHttpFailure flattens a pydantic field error and drops its prefix', () => {
+  // Exactly what FastAPI emits for MangaOCRRequest.validate_bboxes.
+  const validatorError = {
+    detail: [{
+      type: 'value_error',
+      loc: ['body', 'bboxes'],
+      msg: 'Value error, bbox 0 must satisfy x2 > x1 and y2 > y1',
+      input: [[0, 10, 10, 5]]
+    }]
   };
+  assert.equal(
+    describeHttpFailure(422, 'Unprocessable Entity', validatorError),
+    'bboxes: bbox 0 must satisfy x2 > x1 and y2 > y1'
+  );
 
-  assert.equal(describeHttpFailure(422, 'Unprocessable Entity', body), 'bboxes.0: bbox 0 must satisfy x2 > x1 and y2 > y1');
+  // And what it emits when StrictInt rejects a coordinate.
+  const typeError = {
+    detail: [{ type: 'int_type', loc: ['body', 'bboxes', 0, 2], msg: 'Input should be a valid integer', input: 10.5 }]
+  };
+  assert.equal(
+    describeHttpFailure(422, 'Unprocessable Entity', typeError),
+    'bboxes.0.2: Input should be a valid integer'
+  );
+});
+
+test('describeHttpFailure accepts a plain list of messages', () => {
+  assert.equal(
+    describeHttpFailure(500, 'Internal Server Error', { error: ['Model not found', 'Retry with a different model'] }),
+    'Model not found'
+  );
 });
 
 test('describeHttpFailure accepts error and message fields from other services', () => {
@@ -100,4 +124,9 @@ test('trimTrailingSlashes strips the slashes a pasted base URL usually carries',
   assert.equal(trimTrailingSlashes('http://localhost:8000'), 'http://localhost:8000');
   assert.equal(trimTrailingSlashes(''), '');
   assert.equal(trimTrailingSlashes(undefined), '');
+});
+
+test('describeHttpFailure skips an empty detail in favour of a populated sibling field', () => {
+  assert.equal(describeHttpFailure(500, 'Internal Server Error', { detail: '', error: 'Model not found' }), 'Model not found');
+  assert.equal(describeHttpFailure(500, 'Internal Server Error', { detail: [], message: 'nope' }), 'nope');
 });
