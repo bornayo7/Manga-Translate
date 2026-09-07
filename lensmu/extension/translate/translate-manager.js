@@ -13,8 +13,6 @@ import { translateWithMyMemory } from './libre-translate.js';
 import { isEffectivelyIdenticalTranslation, trimTrailingSlashes } from '../shared/text.js';
 import { resolveProviderModel } from '../shared/llm-models.js';
 
-export { resolveProviderModel };
-
 const LANGUAGE_ALIASES = {
   english: 'en',
   eng: 'en',

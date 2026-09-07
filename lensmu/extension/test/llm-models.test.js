@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_LLM_MODELS,
   LLM_MODEL_OPTIONS,
-  getRetiredModelReplacement,
   openAiModelSupportsTemperature,
   resolveProviderModel
 } from '../shared/llm-models.js';
@@ -20,10 +19,10 @@ test('every provider default is one of the models the popup offers', () => {
   assert.equal(DEFAULT_EXTENSION_SETTINGS.llmModel, DEFAULT_LLM_MODELS.gemini);
 });
 
-test('no offered model is itself on the retired list', () => {
-  for (const models of Object.values(LLM_MODEL_OPTIONS)) {
+test('every offered model resolves to itself, so none is on the retired list', () => {
+  for (const [provider, models] of Object.entries(LLM_MODEL_OPTIONS)) {
     for (const model of models) {
-      assert.equal(getRetiredModelReplacement(model.id), null, `${model.id} is listed but retired`);
+      assert.equal(resolveProviderModel(provider, model.id), model.id, `${model.id} is listed but retired`);
     }
   }
 });

@@ -1,10 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  resolveProviderModel,
-  shouldTranslateTextBlock
-} from '../translate/translate-manager.js';
+import { shouldTranslateTextBlock } from '../translate/translate-manager.js';
+import { resolveProviderModel } from '../shared/llm-models.js';
 
 test('short Latin text is translated when auto source differs from target', () => {
   const decision = shouldTranslateTextBlock('Hello', 'es', 'auto');

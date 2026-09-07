@@ -9,7 +9,9 @@
 //     Flash-Lite, 2.5 Pro and the 3.x Flash line are current.
 //   - Anthropic: the Claude 3.x family and claude-sonnet-4-20250514 are
 //     retired; claude-sonnet-5, claude-opus-5 and claude-haiku-4-5-20251001
-//     are current.
+//     are current. Sonnet 4.5/4.6 and Opus 4.5-4.8 are still served as
+//     legacy models, so a stored ID from that range passes through unchanged
+//     even though the picker does not offer it.
 //   - OpenAI: gpt-4, gpt-4-turbo, gpt-4.1-nano and gpt-3.5-turbo shut down
 //     on 2026-10-23; gpt-4o, gpt-4o-mini, gpt-4.1(-mini) and gpt-5(-mini)
 //     are current.
@@ -68,7 +70,7 @@ const RETIRED_MODEL_REPLACEMENTS = Object.freeze([
 ]);
 
 // Returns the replacement for a retired model ID, or null if it is current.
-export function getRetiredModelReplacement(model) {
+function getRetiredModelReplacement(model) {
   const trimmed = String(model || '').trim();
   for (const [pattern, replacement] of RETIRED_MODEL_REPLACEMENTS) {
     if (pattern.test(trimmed)) {
