@@ -125,3 +125,13 @@ test('parseNumberedResponse does not read a decimal or an unspaced number as a m
   assert.deepEqual(parseNumberedResponse('[1] Chapter\n2.Return\n[2] End', 2), ['Chapter\n2.Return', 'End']);
   assert.deepEqual(parseNumberedResponse('**1.** Hello\n**2.** World', 2), ['Hello', 'World']);
 });
+
+import { requireResponseText } from '../translate/llm-translate.js';
+
+test('requireResponseText passes text through and names the reason for an empty reply', () => {
+  assert.equal(requireResponseText('Claude', '[1] Hi', 'end_turn'), '[1] Hi');
+  assert.throws(() => requireResponseText('Claude', '', 'max_tokens'), /output limit/);
+  assert.throws(() => requireResponseText('OpenAI', '   ', 'length'), /output limit/);
+  assert.throws(() => requireResponseText('OpenAI', undefined, 'content_filter'), /returned no text \(content_filter\)/);
+  assert.throws(() => requireResponseText('The custom API', ''), /returned no text\./);
+});

@@ -133,6 +133,27 @@ function warnIfTruncated(providerName, truncated) {
   }
 }
 
+/*
+ * A provider that produced no text at all is a failed request, not an
+ * empty translation: a thinking model can spend the whole budget before
+ * writing the answer. Throwing (as parseGeminiResponse already does) is
+ * what lets translate-manager's opt-in public fallback engage; returning
+ * '' would resolve with an all-empty array and skip it.
+ */
+export function requireResponseText(providerName, text, stopReason = '') {
+  if (String(text || '').trim()) {
+    return text;
+  }
+
+  if (stopReason === 'length' || stopReason === 'max_tokens') {
+    throw new Error(
+      `${providerName} hit its output limit before producing a translation. Try a smaller page or a faster model.`
+    );
+  }
+
+  throw new Error(`${providerName} returned no text${stopReason ? ` (${stopReason})` : ''}.`);
+}
+
 /**
  * Translate text blocks using an LLM (OpenAI or Claude).
  *
@@ -277,8 +298,9 @@ async function callOpenAI(userMessage, apiKey, model, maxOutputTokens) {
    *   }]
    * }
    */
-  warnIfTruncated('OpenAI', data.choices?.[0]?.finish_reason === 'length');
-  return data.choices?.[0]?.message?.content || '';
+  const finishReason = data.choices?.[0]?.finish_reason || '';
+  warnIfTruncated('OpenAI', finishReason === 'length');
+  return requireResponseText('OpenAI', data.choices?.[0]?.message?.content, finishReason);
 }
 
 /**
@@ -352,7 +374,7 @@ async function callClaude(userMessage, apiKey, model, maxOutputTokens) {
    * block rather than assuming content[0] is the answer.
    */
   warnIfTruncated('Claude', data.stop_reason === 'max_tokens');
-  return extractClaudeText(data);
+  return requireResponseText('Claude', extractClaudeText(data), data.stop_reason || '');
 }
 
 export function extractClaudeText(data) {
@@ -519,8 +541,9 @@ async function callCustom(userMessage, apiKey, model, baseUrl, maxOutputTokens) 
   }
 
   const data = await response.json();
-  warnIfTruncated('The custom API', data.choices?.[0]?.finish_reason === 'length');
-  return data.choices?.[0]?.message?.content || '';
+  const finishReason = data.choices?.[0]?.finish_reason || '';
+  warnIfTruncated('The custom API', finishReason === 'length');
+  return requireResponseText('The custom API', data.choices?.[0]?.message?.content, finishReason);
 }
 
 /*
