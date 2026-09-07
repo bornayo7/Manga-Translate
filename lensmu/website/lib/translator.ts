@@ -8,6 +8,7 @@ import {
   assertMyMemoryStatus,
   ensureTranslatedText,
 } from "../../extension/shared/mymemory.js";
+import { describeHttpFailure, selectMangaBboxes } from "../../extension/shared/text.js";
 
 export type ProcessState =
   | "idle"
@@ -221,7 +222,12 @@ async function runOCR(
     const detections = paddleData?.detections ?? [];
     if (detections.length === 0) return [];
 
-    const bboxes = detections.map((d: { bbox: number[] }) => d.bbox);
+    // Only post boxes the backend validator accepts: it rejects the whole
+    // request on one bad box and caps the count and total area (the
+    // extension does the same in background.js).
+    const bboxes = selectMangaBboxes(detections);
+    if (bboxes.length === 0) return normalizePaddleDetections(detections);
+
     const mangaData = await postJSON<BackendOcrResponse>(`${backendUrl}/ocr/manga`, {
       image: imageBase64,
       bboxes,
@@ -276,16 +282,12 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    let detail = "";
-    try {
-      const data = await response.json();
-      const rawDetail = data?.detail || data?.message || data;
-      detail = typeof rawDetail === "string" ? rawDetail : JSON.stringify(rawDetail);
-    } catch {
-      detail = await response.text().catch(() => "");
-    }
+    const contentType = response.headers.get("content-type") || "";
+    const body: unknown = contentType.includes("application/json")
+      ? await response.json().catch(() => null)
+      : await response.text().catch(() => "");
     throw new Error(
-      `Backend error ${response.status}: ${detail || response.statusText}. ` +
+      `Backend error: ${describeHttpFailure(response.status, response.statusText, body)}. ` +
         `Make sure the backend is running at ${new URL(url).origin}.`
     );
   }
