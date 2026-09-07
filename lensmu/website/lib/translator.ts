@@ -3,6 +3,11 @@
 // All work happens in the browser; no Next.js API route is needed.
 
 import { chunkText } from "../../extension/shared/text-chunking.js";
+import {
+  MYMEMORY_CHAR_LIMIT,
+  assertMyMemoryStatus,
+  ensureTranslatedText,
+} from "../../extension/shared/mymemory.js";
 
 export type ProcessState =
   | "idle"
@@ -52,7 +57,6 @@ export type TranslateResult = {
 };
 
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
-const MYMEMORY_CHAR_LIMIT = 500;
 const REQUEST_TIMEOUT_MS = 30000;
 
 async function fetchWithTimeout(
@@ -99,42 +103,6 @@ function languagesClearlyDiffer(sourceLang: string, targetLang: string): boolean
   }
 
   return normalizedSource !== normalizedTarget;
-}
-
-function ensureTranslatedText(
-  rawTranslatedText: unknown,
-  originalText: string,
-  providerName: string
-): string {
-  // MyMemory reports quota trouble inside translatedText, either appended to
-  // a real translation or as the whole payload once the daily limit is gone.
-  const raw = String(rawTranslatedText ?? "").trim();
-  const warningIndex = raw.search(/MYMEMORY WARNING:/i);
-  const cleaned = (warningIndex === -1 ? raw : raw.slice(0, warningIndex)).trim();
-
-  if (warningIndex !== -1) {
-    const detail = raw.slice(warningIndex).replace(/^MYMEMORY WARNING:\s*/i, "").trim();
-    const readable = detail ? detail.charAt(0) + detail.slice(1).toLowerCase() : "daily quota reached.";
-
-    if (!cleaned) {
-      throw new Error(`${providerName} quota: ${readable}`);
-    }
-
-    console.warn(`[VisionTranslate Website] ${providerName} warning: ${readable}`);
-  }
-
-  if (!cleaned) {
-    throw new Error(`${providerName} returned an empty translatedText payload.`);
-  }
-
-  if (isEffectivelyIdenticalTranslation(originalText, cleaned)) {
-    console.warn("[VisionTranslate Website] Provider returned text identical to source", {
-      provider: providerName,
-      characterCount: String(originalText ?? "").length,
-    });
-  }
-
-  return cleaned;
 }
 
 export async function translateImage(
@@ -417,17 +385,8 @@ async function translateOne(
     throw new Error(`MyMemory ${response.status} ${response.statusText}`);
   }
   const data = await response.json();
-  const responseStatus = Number(data?.responseStatus ?? 200);
-  if (Number.isFinite(responseStatus) && responseStatus !== 200) {
-    throw new Error(
-      `MyMemory error ${responseStatus}: ${data.responseDetails ?? "unknown"}`
-    );
-  }
-  return ensureTranslatedText(
-    data?.responseData?.translatedText,
-    text,
-    "MyMemory"
-  );
+  assertMyMemoryStatus(data);
+  return ensureTranslatedText(data?.responseData?.translatedText, text, "MyMemory");
 }
 
 // -- Canvas rendering --

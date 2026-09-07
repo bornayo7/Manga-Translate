@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ensureTranslatedText } from '../translate/libre-translate.js';
+import { assertMyMemoryStatus, ensureTranslatedText } from '../shared/mymemory.js';
 
 test('ensureTranslatedText returns a clean translation untouched', () => {
   assert.equal(ensureTranslatedText('  Hello there ', 'こんにちは', 'MyMemory'), 'Hello there');
@@ -37,4 +37,18 @@ test('ensureTranslatedText reports an exhausted quota instead of an empty payloa
 
 test('ensureTranslatedText still rejects a genuinely empty payload', () => {
   assert.throws(() => ensureTranslatedText('', 'text', 'MyMemory'), /empty translatedText payload/);
+});
+
+test('assertMyMemoryStatus reads the real outcome out of a 200 body', () => {
+  assert.doesNotThrow(() => assertMyMemoryStatus({ responseStatus: 200, responseData: { translatedText: 'Hi' } }));
+  assert.doesNotThrow(() => assertMyMemoryStatus({ responseStatus: '200' }));
+  assert.throws(() => assertMyMemoryStatus({ responseStatus: '403', responseDetails: 'LIMIT' }), /MyMemory error \(403\): LIMIT/);
+  assert.throws(() => assertMyMemoryStatus({ responseStatus: 429 }), /MyMemory error \(429\)/);
+  assert.throws(
+    () => assertMyMemoryStatus({ responseStatus: 200, quotaFinished: true, responseData: { translatedText: '' } }),
+    /daily quota reached/
+  );
+  assert.doesNotThrow(() =>
+    assertMyMemoryStatus({ responseStatus: 200, quotaFinished: true, responseData: { translatedText: 'still here' } })
+  );
 });
