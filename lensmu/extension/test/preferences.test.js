@@ -49,6 +49,30 @@ test('mergeWithDefaults coerces stored values to the type of their default', () 
   assert.equal(merged.llmModel, DEFAULT_EXTENSION_SETTINGS.llmModel);
 });
 
+test('mergeWithDefaults clamps numeric settings and normalises base URLs from any writer', () => {
+  const merged = mergeWithDefaults({
+    minImageWidth: 0,
+    minImageHeight: '1',
+    maxConcurrentImages: 99,
+    overlayOpacity: 5,
+    elevenLabsSpeed: 0.1,
+    overlayMinFontSize: 12,
+    backendUrl: ' http://localhost:8000/ ',
+    customBaseUrl: 'http://localhost:11434/v1//',
+    customOcrUrl: 'http://localhost:3000/ocr/'
+  });
+
+  assert.equal(merged.minImageWidth, 32);
+  assert.equal(merged.minImageHeight, 32);
+  assert.equal(merged.maxConcurrentImages, 12);
+  assert.equal(merged.overlayOpacity, 1);
+  assert.equal(merged.elevenLabsSpeed, 0.7);
+  assert.equal(merged.overlayMinFontSize, 12);
+  assert.equal(merged.backendUrl, 'http://localhost:8000');
+  assert.equal(merged.customBaseUrl, 'http://localhost:11434/v1');
+  assert.equal(merged.customOcrUrl, 'http://localhost:3000/ocr/', 'a full endpoint URL is left alone');
+});
+
 test('content-script settings never contain credential values', () => {
   const input = Object.fromEntries(
     SENSITIVE_SETTING_KEYS.map((key) => [key, `private-${key}`])

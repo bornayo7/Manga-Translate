@@ -74,6 +74,21 @@ export const DEFAULT_SYNCED_PREFERENCES: Readonly<SyncedPreferences>;
 
 export const SETTINGS_STORAGE_KEY: string;
 
+export const SETTING_RANGES: Readonly<
+  Record<
+    | 'minImageWidth'
+    | 'minImageHeight'
+    | 'maxConcurrentImages'
+    | 'overlayMinFontSize'
+    | 'overlayOpacity'
+    | 'elevenLabsStability'
+    | 'elevenLabsSimilarityBoost'
+    | 'elevenLabsStyle'
+    | 'elevenLabsSpeed',
+    Readonly<{ min: number; max: number }>
+  >
+>;
+
 export function clampNumber(
   value: unknown,
   min: number,
