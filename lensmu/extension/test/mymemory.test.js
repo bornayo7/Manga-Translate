@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assertMyMemoryStatus, ensureTranslatedText } from '../shared/mymemory.js';
+import {
+  MYMEMORY_BYTE_LIMIT,
+  assertMyMemoryStatus,
+  buildMyMemoryLangPair,
+  ensureTranslatedText,
+  exceedsMyMemoryLimit,
+  resolveMyMemorySourceLanguage
+} from '../shared/mymemory.js';
 
 test('ensureTranslatedText returns a clean translation untouched', () => {
   assert.equal(ensureTranslatedText('  Hello there ', 'こんにちは', 'MyMemory'), 'Hello there');
@@ -50,5 +57,38 @@ test('assertMyMemoryStatus reads the real outcome out of a 200 body', () => {
   );
   assert.doesNotThrow(() =>
     assertMyMemoryStatus({ responseStatus: 200, quotaFinished: true, responseData: { translatedText: 'still here' } })
+  );
+});
+
+test('the request size limit is measured in UTF-8 bytes', () => {
+  assert.equal(MYMEMORY_BYTE_LIMIT, 500);
+  assert.equal(exceedsMyMemoryLimit('x'.repeat(500)), false);
+  assert.equal(exceedsMyMemoryLimit('x'.repeat(501)), true);
+  assert.equal(exceedsMyMemoryLimit('漢'.repeat(166)), false, '498 bytes');
+  assert.equal(exceedsMyMemoryLimit('漢'.repeat(167)), true, '501 bytes');
+  assert.equal(exceedsMyMemoryLimit('漢'.repeat(200)), true, '200 characters is already 600 bytes');
+});
+
+test('an explicit source language is sent as-is and never re-detected', () => {
+  assert.deepEqual(resolveMyMemorySourceLanguage('ja', 'Hello there'), { language: 'ja', detected: false, reason: 'explicit' });
+  assert.equal(resolveMyMemorySourceLanguage('zh-CN', '这是中文').language, 'zh');
+  assert.equal(buildMyMemoryLangPair('ja', 'en'), 'ja|en');
+});
+
+test('"auto" is resolved from the script when the evidence is decisive', () => {
+  assert.equal(resolveMyMemorySourceLanguage('auto', 'これは日本語です').language, 'ja');
+  assert.equal(resolveMyMemorySourceLanguage('auto', '안녕하세요').language, 'ko');
+  assert.equal(resolveMyMemorySourceLanguage('auto', 'Как дела?').language, 'ru');
+  assert.equal(resolveMyMemorySourceLanguage('', 'The cat sat on the mat and the dog was there too').language, 'en');
+});
+
+test('"auto" is refused, with guidance, when the text cannot be told apart', () => {
+  assert.throws(
+    () => resolveMyMemorySourceLanguage('auto', '東京'),
+    /needs an explicit source language.*Han characters/
+  );
+  assert.throws(
+    () => resolveMyMemorySourceLanguage('auto', 'Ausfahrt'),
+    /needs an explicit source language/
   );
 });
