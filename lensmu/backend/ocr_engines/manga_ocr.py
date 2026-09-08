@@ -60,6 +60,7 @@ class MangaOCREngine:
 
     # --- Singleton machinery ---------------------------------------------------
     _instance: Optional["MangaOCREngine"] = None
+    _loading: bool = False
     _lock: threading.Lock = threading.Lock()
 
     def __init__(self) -> None:
@@ -92,13 +93,22 @@ class MangaOCREngine:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = cls()
+                    cls._loading = True
+                    try:
+                        cls._instance = cls()
+                    finally:
+                        cls._loading = False
         return cls._instance
 
     @classmethod
     def is_loaded(cls) -> bool:
         """Whether the model has been loaded, without triggering a load."""
         return cls._instance is not None
+
+    @classmethod
+    def is_loading(cls) -> bool:
+        """Whether the first load is in progress. A plain flag read: never waits on the lock."""
+        return cls._loading
 
     def process_image(self, image_bytes: bytes) -> str:
         """

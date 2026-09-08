@@ -147,10 +147,13 @@ class HealthResponse(BaseModel):
     status: str
     paddle_ocr_available: bool
     paddle_ocr_loaded: bool
+    paddle_ocr_loading: bool = False
     manga_ocr_available: bool
     manga_ocr_loaded: bool
+    manga_ocr_loading: bool = False
     manga_full_available: bool
     paddle_loaded_languages: list[str]
+    paddle_loading_languages: list[str] = Field(default_factory=list)
 
 
 # -- App lifespan --------------------------------------------------------------
@@ -260,19 +263,47 @@ def decode_base64_image(base64_string: str) -> bytes:
 
 # -- Endpoints -----------------------------------------------------------------
 
+def _engine_status_snapshot() -> dict:
+    """
+    Read the engines' state without ever waiting on a model load.
+
+    The engine wrappers keep their cache maps behind a lock that is only
+    held for dictionary operations; model construction happens under a
+    separate lock, so these reads return immediately while a model loads.
+    They are still run off the event loop (see health_check) so an
+    unexpected contention can never stall other requests.
+    """
+    loaded_languages = PaddleOCREngine.get_loaded_languages() if PADDLE_AVAILABLE else []
+    loading_languages = (
+        list(getattr(PaddleOCREngine, "get_loading_languages", lambda: [])())
+        if PADDLE_AVAILABLE
+        else []
+    )
+    manga_loaded = MANGA_AVAILABLE and MangaOCREngine.is_loaded()
+    manga_loading = MANGA_AVAILABLE and bool(getattr(MangaOCREngine, "is_loading", lambda: False)())
+    return {
+        "paddle_loaded_languages": loaded_languages,
+        "paddle_loading_languages": loading_languages,
+        "manga_loaded": bool(manga_loaded),
+        "manga_loading": bool(manga_loading),
+    }
+
+
 @app.get("/health", response_model=HealthResponse, summary="Health check")
 async def health_check() -> HealthResponse:
-    loaded_languages = (
-        PaddleOCREngine.get_loaded_languages() if PADDLE_AVAILABLE else []
-    )
+    snapshot = await asyncio.to_thread(_engine_status_snapshot)
+    loaded_languages = snapshot["paddle_loaded_languages"]
     return HealthResponse(
         status="ok",
         paddle_ocr_available=PADDLE_AVAILABLE,
         paddle_ocr_loaded=bool(loaded_languages),
+        paddle_ocr_loading=bool(snapshot["paddle_loading_languages"]),
         manga_ocr_available=MANGA_AVAILABLE,
-        manga_ocr_loaded=MANGA_AVAILABLE and MangaOCREngine.is_loaded(),
+        manga_ocr_loaded=snapshot["manga_loaded"],
+        manga_ocr_loading=snapshot["manga_loading"],
         manga_full_available=PADDLE_AVAILABLE and MANGA_AVAILABLE,
         paddle_loaded_languages=loaded_languages,
+        paddle_loading_languages=snapshot["paddle_loading_languages"],
     )
 
 

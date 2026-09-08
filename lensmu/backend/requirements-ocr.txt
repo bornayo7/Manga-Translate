@@ -6,10 +6,11 @@
 # platform-specific installation steps and doesn't support all Python versions.
 #
 # COMPATIBILITY:
-#   - PaddlePaddle supports Python 3.8–3.12 (as of 2025).
-#     Python 3.13+ is NOT yet supported. If you're on 3.13+, skip PaddleOCR
-#     and use Tesseract.js (in-browser) or Google Cloud Vision instead.
-#   - manga-ocr requires Python 3.8–3.12 and PyTorch.
+#   - The backend itself needs Python 3.10-3.12 (server.py uses 3.10 syntax).
+#   - paddlepaddle 2.6.2 ships wheels for Python 3.8-3.12 only (PyPI, checked
+#     2026-09-07); Python 3.13+ is NOT supported. If you're on 3.13+, skip
+#     PaddleOCR and use Tesseract.js (in-browser) or Google Cloud Vision instead.
+#   - manga-ocr 0.1.16 requires Python >=3.9 and PyTorch.
 #
 # INSTALL PADDLEPADDLE (pick ONE based on your platform):
 #
@@ -26,7 +27,7 @@
 #     pip install paddlepaddle==2.6.2
 #
 # THEN install PaddleOCR and MangaOCR:
-#   pip install paddleocr>=2.7.0 manga-ocr>=0.1.8
+#   pip install "paddleocr>=2.7.0,<3.0" "manga-ocr>=0.1.8"
 #
 # FIRST-RUN MODEL DOWNLOADS:
 #   - PaddleOCR downloads detection + recognition models (~100 MB) on first use.
@@ -34,5 +35,8 @@
 #   These are cached, so subsequent runs are fast.
 # =============================================================================
 
-paddleocr>=2.7.0          # general-purpose OCR (supports 80+ languages)
+paddleocr>=2.7.0,<3.0     # 2.x line: matches the pinned paddlepaddle==2.6.2 above.
+                          # PaddleOCR 3.x needs PaddlePaddle 3.x; the backend adapter
+                          # supports both APIs, so to use 3.x install paddlepaddle>=3.0
+                          # and paddleocr>=3.0 together instead.
 manga-ocr>=0.1.8          # specialized Japanese manga text recognition

@@ -82,11 +82,13 @@ $pythonPath = Join-Path $venvDir "Scripts\python.exe"
 Write-Host "  Installing core dependencies..."
 & $pipPath install -r (Join-Path $backendDir "requirements.txt") --quiet
 
-Write-Host "  Installing PaddlePaddle (this may take a few minutes)..."
-& $pipPath install paddlepaddle --quiet
+Write-Host "  Installing PaddlePaddle 2.6.2 (this may take a few minutes)..."
+# Pinned to match requirements-ocr.txt and the Dockerfile; PaddleOCR 3.x needs
+# PaddlePaddle 3.x, so the two are installed as one matching pair.
+& $pipPath install "paddlepaddle==2.6.2" --quiet
 
-Write-Host "  Installing PaddleOCR..."
-& $pipPath install "paddleocr>=2.7.0" --quiet
+Write-Host "  Installing PaddleOCR 2.x..."
+& $pipPath install "paddleocr>=2.7.0,<3.0" --quiet
 
 Write-Host "  Installing MangaOCR..."
 & $pipPath install "manga-ocr>=0.1.8" --quiet

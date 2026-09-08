@@ -46,9 +46,19 @@ pip install paddlepaddle==2.6.2 -f https://www.paddlepaddle.org.cn/whl/mac/cpu/p
 # Linux / Windows (CPU)
 pip install paddlepaddle==2.6.2
 
-# Then the engines themselves
+# Then the engines themselves (PaddleOCR 2.x, the line that runs on PaddlePaddle 2.6.2)
 pip install -r requirements-ocr.txt
 ```
+
+`ocr_engines/paddle_ocr.py` adapts to both PaddleOCR API generations: the 2.x
+`**kwargs` constructor (2.7–2.10: `use_angle_cls`, `det_db_thresh`,
+`det_db_unclip_ratio`, `use_gpu`, `show_log`) and the 3.x explicit-keyword
+constructor (`use_textline_orientation`, `text_det_thresh`,
+`text_det_unclip_ratio`). `requirements-ocr.txt` pins the 2.x line because it is
+what `paddlepaddle==2.6.2` runs; to use 3.x install `paddlepaddle>=3.0` and
+`paddleocr>=3.0` together. The adapter's behaviour for both signatures is
+covered by `test_paddle_versions.py`; a real-model smoke test is opt-in
+(`VT_LIVE_OCR=1 pytest test_paddle_ocr_live.py`) because it downloads models.
 
 The first PaddleOCR request downloads ~100 MB of models; the first MangaOCR request downloads a ~400 MB model. Both are cached afterwards.
 
@@ -75,14 +85,17 @@ Expected response on a fresh install with no engines:
   "status": "ok",
   "paddle_ocr_available": false,
   "paddle_ocr_loaded": false,
+  "paddle_ocr_loading": false,
   "manga_ocr_available": false,
   "manga_ocr_loaded": false,
+  "manga_ocr_loading": false,
   "manga_full_available": false,
-  "paddle_loaded_languages": []
+  "paddle_loaded_languages": [],
+  "paddle_loading_languages": []
 }
 ```
 
-`*_available` says whether a package is importable; `*_loaded` flips to `true` after the first request loads that model (models are lazy-loaded to keep startup fast). `manga_full_available` is true only when both engines are installed, because the MangaOCR flow needs PaddleOCR for detection.
+`*_available` says whether a package is importable; `*_loading` is true while a model is being constructed (the first request for a language takes 5–15 s); `*_loaded` flips to `true` once that finishes. Models are lazy-loaded to keep startup fast, and `/health` never triggers a load or waits for one: it answers within milliseconds even while a model is loading. `manga_full_available` is true only when both engines are installed, because the MangaOCR flow needs PaddleOCR for detection.
 
 ## API Endpoints
 
@@ -164,7 +177,7 @@ curl -X POST http://localhost:8000/ocr/manga \
 }
 ```
 
-Validation: 1 to 200 boxes, integer coordinates between 0 and 100000 with `x2 > x1` and `y2 > y1`, and at most 50 million pixels of total box area. Any violation rejects the whole request with `422`.
+Validation: 1 to 200 boxes, integer coordinates between 0 and 100000 with `x2 > x1` and `y2 > y1`, and at most 50 million pixels of total box area. Any violation rejects the whole request with `422`. Clients with more regions than that send several requests: the extension and the website demo split PaddleOCR's detections into compliant batches (`extension/shared/ocr-responses.js`) and merge the answers back by detection index, keeping PaddleOCR's own text for any region MangaOCR returns empty.
 
 **Response:**
 

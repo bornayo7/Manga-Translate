@@ -157,7 +157,7 @@ pip install paddlepaddle==2.6.2
 pip install paddlepaddle==2.6.2
 
 # Then install PaddleOCR and MangaOCR:
-pip install paddleocr>=2.7.0 manga-ocr>=0.1.8
+pip install "paddleocr>=2.7.0,<3.0" "manga-ocr>=0.1.8"
 ```
 
 ### Step 4: Start the backend server
@@ -353,7 +353,7 @@ After the watcher rebuilds, go to `chrome://extensions` and click the refresh ic
 - **Virtual environment not activated:** You should see `(venv)` in your terminal. If not, run `source venv/bin/activate` (macOS/Linux) or `.\venv\Scripts\Activate.ps1` (Windows).
 - **Dependencies not installed:** Run `pip install -r requirements.txt` again.
 - **Port 8000 in use:** Use a different port: `uvicorn server:app --host 127.0.0.1 --port 8001 --reload` and update the backend URL in the extension settings.
-- **PaddlePaddle import error:** PaddlePaddle requires Python 3.8–3.12. Use Tesseract.js as an alternative.
+- **PaddlePaddle import error:** the pinned paddlepaddle 2.6.2 ships wheels for Python 3.8–3.12 only, and the backend itself needs 3.10–3.12. Use Tesseract.js as an alternative.
 
 ### Extension can't reach the backend
 

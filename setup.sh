@@ -7,8 +7,8 @@
 #   ./setup.sh
 #
 # What it does:
-#   1. Checks for Python 3.12 — gives install instructions if missing
-#   2. Creates a virtual environment with Python 3.12
+#   1. Checks for Python 3.10-3.12 — gives install instructions if missing
+#   2. Creates a virtual environment with that Python
 #   3. Installs backend dependencies (FastAPI, PaddleOCR, MangaOCR)
 #   4. Installs extension dependencies (npm)
 #   5. Builds the extension
@@ -29,15 +29,15 @@ EXTENSION_DIR="$SCRIPT_DIR/lensmu/extension"
 # ---------------------------------------------------------------------------
 # Step 1: Find a Python version supported by PaddleOCR and MangaOCR
 # ---------------------------------------------------------------------------
-echo "[1/5] Checking for Python 3.8-3.12..."
+echo "[1/5] Checking for Python 3.10-3.12..."
 
 BACKEND_PYTHON=""
-for cmd in python3.12 python3.11 python3.10 python3.9 python3.8 python3; do
+for cmd in python3.12 python3.11 python3.10 python3; do
     if command -v "$cmd" &>/dev/null; then
         version=$($cmd --version 2>&1)
-        # PaddleOCR and manga-ocr currently support Python 3.8 through 3.12.
+        # server.py needs 3.10+ syntax; paddlepaddle 2.6.2 ships wheels up to 3.12.
         minor=$(echo "$version" | sed -E 's/Python 3\.([0-9]+).*/\1/')
-        if [[ "$minor" =~ ^[0-9]+$ ]] && [ "$minor" -ge 8 ] && [ "$minor" -le 12 ]; then
+        if [[ "$minor" =~ ^[0-9]+$ ]] && [ "$minor" -ge 10 ] && [ "$minor" -le 12 ]; then
             BACKEND_PYTHON="$cmd"
             echo "  Found: $version"
             break
@@ -80,21 +80,22 @@ echo "[3/5] Installing backend dependencies..."
 
 pip install -r "$BACKEND_DIR/requirements.txt" --quiet
 
-echo "  Installing PaddlePaddle (this may take a few minutes)..."
-# Detect platform for PaddlePaddle install
-if [[ "$(uname -m)" == "arm64" ]] && [[ "$(uname)" == "Darwin" ]]; then
-    pip install paddlepaddle --quiet 2>/dev/null || true
+echo "  Installing PaddlePaddle 2.6.2 (this may take a few minutes)..."
+# The pinned version matches requirements-ocr.txt and the Dockerfile; macOS
+# wheels come from PaddlePaddle's own index. Errors are shown, not hidden.
+if [[ "$(uname)" == "Darwin" ]]; then
+    pip install "paddlepaddle==2.6.2" -f https://www.paddlepaddle.org.cn/whl/mac/cpu/paddlepaddle.html --quiet || true
 else
-    pip install paddlepaddle --quiet 2>/dev/null || true
+    pip install "paddlepaddle==2.6.2" --quiet || true
 fi
 
 if python -c "import paddle" &>/dev/null 2>&1; then
-    echo "  Installing PaddleOCR..."
-    pip install "paddleocr>=2.7.0" --quiet 2>/dev/null || echo "  WARNING: PaddleOCR could not be installed — PaddleOCR engine will be unavailable."
+    echo "  Installing PaddleOCR 2.x (the release line that runs on PaddlePaddle 2.6.2)..."
+    pip install "paddleocr>=2.7.0,<3.0" --quiet || echo "  WARNING: PaddleOCR could not be installed — PaddleOCR engine will be unavailable."
 else
     echo "  WARNING: PaddlePaddle could not be installed (likely unsupported Python version)."
     echo "           PaddleOCR engine will be unavailable. MangaOCR will still work."
-    echo "           To enable PaddleOCR, install Python 3.12: brew install python@3.12"
+    echo "           To enable PaddleOCR, install Python 3.10-3.12: brew install python@3.12"
 fi
 
 echo "  Installing MangaOCR..."

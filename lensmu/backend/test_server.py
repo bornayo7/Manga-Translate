@@ -437,3 +437,105 @@ class TestCORS:
             headers={"Origin": "http://127.0.0.1:3000"},
         )
         assert response.headers.get("access-control-allow-origin") == "http://127.0.0.1:3000"
+
+
+# ---------------------------------------------------------------------------
+# Health responsiveness during model initialisation
+# ---------------------------------------------------------------------------
+
+class TestHealthDuringModelLoad:
+    def test_health_and_unrelated_requests_answer_while_paddle_loads(self, monkeypatch):
+        """/health must not queue behind the first model load.
+
+        A fake engine blocks inside get_instance() until the test releases
+        it, exactly where the real wrapper spends 5-15 s building a model.
+        While that request is parked, /health (and any other request) must
+        answer within a small budget and report the language as loading.
+        """
+        import asyncio
+        import threading
+
+        import httpx
+
+        load_started = threading.Event()
+        load_release = threading.Event()
+        loading = set()
+
+        class SlowPaddleEngine:
+            @classmethod
+            def get_instance(cls, language):
+                loading.add(language)
+                load_started.set()
+                assert load_release.wait(timeout=5), "test never released the fake load"
+                loading.discard(language)
+                return cls()
+
+            @classmethod
+            def get_loaded_languages(cls):
+                return []
+
+            @classmethod
+            def get_loading_languages(cls):
+                return sorted(loading)
+
+            def process_image(self, image_bytes):
+                return []
+
+        monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
+        monkeypatch.setattr(server, "PaddleOCREngine", SlowPaddleEngine)
+
+        async def scenario():
+            transport = httpx.ASGITransport(app=server.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+                ocr_task = asyncio.create_task(
+                    async_client.post(
+                        "/ocr/paddle",
+                        json={"image": base64.b64encode(TINY_PNG).decode(), "lang": "ja"},
+                    )
+                )
+                await asyncio.to_thread(load_started.wait, 5)
+                assert load_started.is_set(), "the model load never started"
+
+                health = await asyncio.wait_for(async_client.get("/health"), timeout=2.0)
+                unrelated = await asyncio.wait_for(async_client.options("/health", headers={
+                    "Origin": "http://localhost:3000",
+                    "Access-Control-Request-Method": "GET",
+                }), timeout=2.0)
+
+                load_release.set()
+                ocr = await asyncio.wait_for(ocr_task, timeout=5.0)
+                return health, unrelated, ocr
+
+        health, unrelated, ocr = asyncio.run(scenario())
+
+        assert health.status_code == 200
+        body = health.json()
+        assert body["paddle_ocr_available"] is True
+        assert body["paddle_ocr_loaded"] is False
+        assert body["paddle_ocr_loading"] is True
+        assert body["paddle_loading_languages"] == ["japan"]
+        assert unrelated.status_code == 200
+        assert ocr.status_code == 200
+
+    def test_health_never_triggers_a_model_load(self, monkeypatch):
+        calls = []
+
+        class CountingEngine:
+            @classmethod
+            def get_instance(cls, language):
+                calls.append(language)
+                return cls()
+
+            @classmethod
+            def get_loaded_languages(cls):
+                return []
+
+            @classmethod
+            def get_loading_languages(cls):
+                return []
+
+        monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
+        monkeypatch.setattr(server, "PaddleOCREngine", CountingEngine)
+        for _ in range(3):
+            assert client.get("/health").status_code == 200
+        assert calls == []

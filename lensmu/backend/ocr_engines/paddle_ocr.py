@@ -48,9 +48,42 @@ from PIL import Image
 # Skip that in the local backend so initialization does not stall on startup.
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
+import paddleocr as _paddleocr_module
 from paddleocr import PaddleOCR
 
 logger = logging.getLogger(__name__)
+
+# Constructor settings per PaddleOCR API generation. The two generations
+# spell the same options differently and 2.x takes them as **kwargs, so the
+# names cannot be discovered from the signature there; the generation is
+# detected first (see _detect_api_generation) and the matching table used.
+#
+#   2.x (2.7 - 2.10): PaddleOCR(**kwargs) -> lang, use_angle_cls, det_db_thresh,
+#                      det_db_unclip_ratio, use_gpu, show_log
+#   3.x (3.0+):       explicit keyword parameters -> lang, use_textline_orientation,
+#                      text_det_thresh, text_det_unclip_ratio (device is left to
+#                      PaddleOCR's own selection)
+PADDLE_2X_SETTINGS = {
+    "use_angle_cls": True,       # detect 180-degree rotated text
+    "det_db_thresh": 0.3,        # catch faint or small text
+    "det_db_unclip_ratio": 1.8,  # expand boxes so they fully contain the text
+    "use_gpu": False,            # CPU by default
+    "show_log": False,           # quiet start-up
+}
+PADDLE_3X_SETTINGS = {
+    "use_textline_orientation": True,
+    "text_det_thresh": 0.3,
+    "text_det_unclip_ratio": 1.8,
+}
+
+
+def _parse_major_version(version) -> "int | None":
+    text = str(version or "").strip()
+    if not text:
+        return None
+    head = text.split(".", 1)[0]
+    digits = "".join(ch for ch in head if ch.isdigit())
+    return int(digits) if digits else None
 
 
 class PaddleOCREngine:
@@ -83,6 +116,7 @@ class PaddleOCREngine:
     #     get_loaded_languages() (and therefore /health, which runs on the
     #     event loop) never wait behind a model load.
     _instances: "OrderedDict[str, PaddleOCREngine]" = OrderedDict()
+    _loading: "set[str]" = set()
     _lock: threading.Lock = threading.Lock()
     _load_lock: threading.Lock = threading.Lock()
     _max_cached_languages = 2
@@ -138,7 +172,13 @@ class PaddleOCREngine:
             if instance is not None:
                 return instance
 
-            instance = cls(normalized_language)
+            with cls._lock:
+                cls._loading.add(normalized_language)
+            try:
+                instance = cls(normalized_language)
+            finally:
+                with cls._lock:
+                    cls._loading.discard(normalized_language)
 
             with cls._lock:
                 cls._instances[normalized_language] = instance
@@ -164,6 +204,12 @@ class PaddleOCREngine:
     def get_loaded_languages(cls) -> list[str]:
         with cls._lock:
             return list(cls._instances.keys())
+
+    @classmethod
+    def get_loading_languages(cls) -> list[str]:
+        """Languages whose model is being constructed right now (never blocks on the load)."""
+        with cls._lock:
+            return sorted(cls._loading)
 
     def process_image(self, image_bytes: bytes) -> list[dict]:
         """
@@ -235,43 +281,73 @@ class PaddleOCREngine:
         return detections
 
     @staticmethod
-    def _build_constructor_kwargs(language: str = "japan") -> dict:
+    def _detect_api_generation(paddle_class=None, module=None) -> str:
         """
-        Build a PaddleOCR constructor kwargs dict that works across both
-        PaddleOCR 2.x and 3.x.
+        Return "v2" or "v3" for the installed PaddleOCR.
 
-        PaddleOCR 3.x renamed several arguments:
-          - use_angle_cls        -> use_textline_orientation
-          - det_db_thresh        -> text_det_thresh
-          - det_db_unclip_ratio  -> text_det_unclip_ratio
-
-        It also dropped `use_gpu` from the high-level pipeline constructor.
+        PaddleOCR 3.x declares its options as explicit keyword parameters,
+        so their presence in the signature is decisive. PaddleOCR 2.x
+        declares ``__init__(self, **kwargs)`` and exposes *no* option names,
+        so checking names against that signature finds nothing; the package
+        version decides there, and a bare ``**kwargs`` constructor with no
+        version information is treated as 2.x (the only API shaped that way).
         """
-        signature = inspect.signature(PaddleOCR.__init__)
-        supported = signature.parameters
-        kwargs: dict = {}
+        paddle_class = paddle_class or PaddleOCR
+        module = module or _paddleocr_module
+        parameters = inspect.signature(paddle_class.__init__).parameters
 
-        if "lang" in supported:
-            kwargs["lang"] = language
+        if any(name in parameters for name in PADDLE_3X_SETTINGS):
+            return "v3"
 
-        if "use_textline_orientation" in supported:
-            kwargs["use_textline_orientation"] = True
-        elif "use_angle_cls" in supported:
-            kwargs["use_angle_cls"] = True
+        major = _parse_major_version(
+            getattr(module, "__version__", None) or getattr(module, "VERSION", None)
+        )
+        if major is not None:
+            return "v3" if major >= 3 else "v2"
 
-        if "text_det_thresh" in supported:
-            kwargs["text_det_thresh"] = 0.3
-        elif "det_db_thresh" in supported:
-            kwargs["det_db_thresh"] = 0.3
+        accepts_var_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+        if accepts_var_kwargs:
+            return "v2"
 
-        if "text_det_unclip_ratio" in supported:
-            kwargs["text_det_unclip_ratio"] = 1.8
-        elif "det_db_unclip_ratio" in supported:
-            kwargs["det_db_unclip_ratio"] = 1.8
+        raise RuntimeError(
+            "Unsupported PaddleOCR: neither the 3.x keyword parameters nor a 2.x "
+            "**kwargs constructor were found. Supported: paddleocr 2.7-2.10 and 3.x."
+        )
 
-        if "use_gpu" in supported:
-            kwargs["use_gpu"] = False
+    @classmethod
+    def _build_constructor_kwargs(cls, language: str = "japan", paddle_class=None, module=None) -> dict:
+        """
+        Build the constructor kwargs for the detected PaddleOCR generation.
 
+        The two generations spell the same settings differently
+        (use_angle_cls -> use_textline_orientation, det_db_thresh ->
+        text_det_thresh, det_db_unclip_ratio -> text_det_unclip_ratio) and
+        3.x dropped ``use_gpu``/``show_log``. Only the matching table is
+        sent: 3.x rejects unknown keywords and 2.x silently ignores them, so
+        guessing would either crash or drop the language.
+        """
+        paddle_class = paddle_class or PaddleOCR
+        generation = cls._detect_api_generation(paddle_class, module)
+        kwargs: dict = {"lang": language}
+
+        if generation == "v3":
+            parameters = inspect.signature(paddle_class.__init__).parameters
+            accepts_var_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+            for name, value in PADDLE_3X_SETTINGS.items():
+                # A 3.x minor release may drop or rename an option; only pass
+                # what this constructor actually declares.
+                if name in parameters or accepts_var_kwargs:
+                    kwargs[name] = value
+            if "lang" not in parameters and not accepts_var_kwargs:
+                raise RuntimeError("This PaddleOCR 3.x constructor does not accept 'lang'.")
+        else:
+            kwargs.update(PADDLE_2X_SETTINGS)
+
+        logger.info("PaddleOCR %s API detected; constructor settings: %s", generation, sorted(kwargs))
         return kwargs
 
     @classmethod
