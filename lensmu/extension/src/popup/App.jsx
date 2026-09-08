@@ -7,7 +7,6 @@ import LanguageSelector from "./components/LanguageSelector.jsx";
 import ReadAloudSettings from "./components/ReadAloudSettings.jsx";
 import {
   DEFAULT_EXTENSION_SETTINGS,
-  SETTINGS_STORAGE_KEY,
   SETTING_RANGES,
   clampNumber,
   mergeWithDefaults,
@@ -15,8 +14,10 @@ import {
 import { trimTrailingSlashes } from "../../shared/text.js";
 import {
   DEFAULT_LLM_MODELS,
+  describeModelMigration,
   resolveProviderModel,
 } from "../../shared/llm-models.js";
+import { createSettingsPersister } from "./settings-persistence.js";
 
 const TAB_ITEMS = [
   { id: "home", label: "Home" },
@@ -41,25 +42,52 @@ const OVERLAY_ALIGNMENT_OPTIONS = [
 const MIN_FONT_SIZE_OPTIONS = [8, 10, 12, 14, 16];
 const READ_ALOUD_TEST_TEXT = "This is a VisionTranslate read aloud test.";
 
+/*
+ * Normalises what storage handed us and reports every change made, so the
+ * popup can persist the migration explicitly and tell the user about it.
+ * llmModel is one setting shared by every provider, and providers retire
+ * IDs over time: a retired ID is replaced by the provider's documented
+ * successor, another provider's ID by the selected provider's default.
+ */
 function normalizeLoadedSettings(rawSettings = {}) {
   const nextSettings = { ...rawSettings };
+  const migrations = [];
 
   if (nextSettings.translationProvider === "google") {
     nextSettings.translationProvider = "libre";
+    migrations.push({ key: "translationProvider", from: "google", to: "libre", reason: "removed" });
   }
 
-  /*
-   * llmModel is one setting shared by every provider, and providers retire
-   * IDs over time. Resolve to what the request will actually send so the
-   * picker shows the truth and the autosave persists the migration.
-   * (Providers without a model rule get the stored value back unchanged.)
-   */
-  nextSettings.llmModel = resolveProviderModel(
+  const modelMigration = describeModelMigration(
     nextSettings.translationProvider,
     nextSettings.llmModel
   );
+  if (modelMigration) {
+    nextSettings.llmModel = resolveProviderModel(
+      nextSettings.translationProvider,
+      nextSettings.llmModel
+    );
+    migrations.push({ key: "llmModel", ...modelMigration });
+  }
 
-  return nextSettings;
+  return { settings: nextSettings, migrations };
+}
+
+function describeMigrations(migrations) {
+  return migrations
+    .map((migration) => {
+      if (migration.key === "llmModel" && migration.reason === "retired") {
+        return `The saved model "${migration.from}" was retired by its provider; "${migration.to}" is used instead.`;
+      }
+      if (migration.key === "llmModel" && migration.reason === "wrong-provider") {
+        return `The saved model "${migration.from}" belongs to another provider; "${migration.to}" is used instead.`;
+      }
+      if (migration.key === "translationProvider") {
+        return "Google Cloud Translation was removed; MyMemory is selected instead.";
+      }
+      return null;
+    })
+    .filter(Boolean);
 }
 
 function sendRuntimeMessage(message) {
@@ -111,23 +139,16 @@ function sendTabMessage(tabId, message) {
   });
 }
 
-async function persistSettingsSnapshot(settings) {
-  try {
-    await sendRuntimeMessage({
-      action: "SAVE_SETTINGS",
-      payload: { settings },
-    });
-  } catch (error) {
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      await chrome.storage.local.set({
-        [SETTINGS_STORAGE_KEY]: mergeWithDefaults(settings),
-      });
-      return;
-    }
-
-    throw error;
-  }
-}
+/*
+ * One persister for the popup's lifetime. It sends small patches as soon
+ * as the current task ends (no timer to lose when the popup closes) and
+ * treats anything but { success: true } as a failure. There is no direct
+ * storage fallback: writing around the background would bypass its
+ * validation and race its serialised saves.
+ */
+const settingsPersister = createSettingsPersister({
+  sendMessage: sendRuntimeMessage,
+});
 
 function ToggleRow({
   label,
@@ -233,7 +254,8 @@ export default function App() {
   const [readAloudStatus, setReadAloudStatus] = useState("");
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
   const [isTestingVoice, setIsTestingVoice] = useState(false);
-  const hasHydrated = useRef(false);
+  const [saveError, setSaveError] = useState("");
+  const [migrationNotices, setMigrationNotices] = useState([]);
   const testAudioRef = useRef(null);
 
   useEffect(() => {
@@ -255,11 +277,23 @@ export default function App() {
           return;
         }
 
-        setSettings(
-          mergeWithDefaults(
-            normalizeLoadedSettings(settingsResponse?.settings || {})
-          )
-        );
+        const normalized = normalizeLoadedSettings(settingsResponse?.settings || {});
+        setSettings(mergeWithDefaults(normalized.settings));
+
+        /*
+         * A migrated value is written back right away so the stored
+         * configuration stops carrying an ID the provider no longer serves,
+         * and the user is told what changed.
+         */
+        if (normalized.migrations.length > 0) {
+          setMigrationNotices(describeMigrations(normalized.migrations));
+          const migratedPatch = Object.fromEntries(
+            normalized.migrations.map((migration) => [migration.key, normalized.settings[migration.key]])
+          );
+          settingsPersister
+            .saveNow(migratedPatch)
+            .catch((error) => setSaveError(error.message));
+        }
 
         if (currentTab?.id) {
           setActiveTabId(currentTab.id);
@@ -301,27 +335,6 @@ export default function App() {
       }
     };
   }, []);
-
-  useEffect(() => {
-    if (!loaded) {
-      return undefined;
-    }
-
-    if (!hasHydrated.current) {
-      hasHydrated.current = true;
-      return undefined;
-    }
-
-    const timeoutId = window.setTimeout(async () => {
-      try {
-        await persistSettingsSnapshot(settings);
-      } catch (error) {
-        console.warn("[VisionTranslate] Could not save settings:", error);
-      }
-    }, 180);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [settings, loaded]);
 
   useEffect(() => {
     if (!loaded) {
@@ -382,19 +395,47 @@ export default function App() {
     };
   }, [loaded, settings.backendUrl, settings.ocrEngine]);
 
+  const persistPatch = (patch) => {
+    setSaveError("");
+    settingsPersister.queuePatch(patch);
+    settingsPersister.whenIdle().then(() => {
+      if (settingsPersister.lastError) {
+        setSaveError(settingsPersister.lastError.message);
+      }
+    });
+  };
+
   const updateSetting = (key, value) => {
     setSettings((previous) => ({
       ...previous,
       [key]: value,
     }));
+    persistPatch({ [key]: value });
   };
 
   const updateTranslationProvider = (provider) => {
-    setSettings((previous) => ({
-      ...previous,
+    const patch = {
       translationProvider: provider,
-      llmModel: DEFAULT_LLM_MODELS[provider] || previous.llmModel,
-    }));
+      llmModel: DEFAULT_LLM_MODELS[provider] || settings.llmModel,
+    };
+    setSettings((previous) => ({ ...previous, ...patch }));
+    persistPatch(patch);
+    setMigrationNotices([]);
+  };
+
+  /*
+   * Confirms every pending change is stored before an action that depends
+   * on it (translate, load voices, test voice). Throws with the reason on
+   * failure so the caller can show it and stop.
+   */
+  const ensureSettingsSaved = async () => {
+    setSaveError("");
+    try {
+      await settingsPersister.saveNow();
+    } catch (error) {
+      setSaveError(error.message);
+      throw error;
+    }
   };
 
   const selectedEngine =
@@ -489,7 +530,12 @@ export default function App() {
     setIsTranslating(true);
 
     try {
-      await persistSettingsSnapshot(settings);
+      try {
+        await ensureSettingsSaved();
+      } catch (error) {
+        console.error("[VisionTranslate] Settings were not saved; not translating:", error);
+        return;
+      }
 
       if (!tabState.active) {
         const toggleResponse = await sendRuntimeMessage({
@@ -520,7 +566,7 @@ export default function App() {
     setReadAloudStatus("");
 
     try {
-      await persistSettingsSnapshot(settings);
+      await ensureSettingsSaved();
 
       const response = await sendRuntimeMessage({
         action: "LOAD_ELEVENLABS_VOICES",
@@ -555,7 +601,7 @@ export default function App() {
     setReadAloudStatus("");
 
     try {
-      await persistSettingsSnapshot(settings);
+      await ensureSettingsSaved();
 
       const response = await sendRuntimeMessage({
         action: "TEST_ELEVENLABS_VOICE",
@@ -877,7 +923,11 @@ export default function App() {
                   updateSetting("geminiApiKey", value)
                 }
                 llmModel={settings.llmModel}
-                onLlmModelChange={(value) => updateSetting("llmModel", value)}
+                onLlmModelChange={(value) => {
+                  setMigrationNotices([]);
+                  updateSetting("llmModel", value);
+                }}
+                migrationNotices={migrationNotices}
                 customApiKey={settings.customApiKey}
                 onCustomApiKeyChange={(value) =>
                   updateSetting("customApiKey", value)
@@ -1129,11 +1179,17 @@ export default function App() {
           {isTranslating ? "Translating..." : "Translate This Page"}
         </button>
 
-        <p className="footer-note">
-          {!tabState.active
-            ? "Page controls will be enabled automatically before translation."
-            : "Runs on the current tab with your current engine settings."}
-        </p>
+        {saveError ? (
+          <p className="footer-note footer-note--error" role="alert">
+            Settings were not saved: {saveError}
+          </p>
+        ) : (
+          <p className="footer-note">
+            {!tabState.active
+              ? "Page controls will be enabled automatically before translation."
+              : "Runs on the current tab with your current engine settings."}
+          </p>
+        )}
       </footer>
     </div>
   );

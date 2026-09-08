@@ -1274,3 +1274,13 @@ select {
     align-items: stretch;
   }
 }
+
+.footer-note--error {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.form-hint--migration {
+  color: #92400e;
+  font-weight: 600;
+}

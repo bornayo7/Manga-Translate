@@ -70,6 +70,7 @@ export default function TranslateSettings({
   onCustomModelNameChange,
   allowThirdPartyFallback,
   onAllowThirdPartyFallbackChange,
+  migrationNotices = [],
 }) {
   const selectedProvider = PROVIDER_OPTIONS.find((option) => option.id === provider);
   const models = LLM_MODEL_OPTIONS[provider] || [];
@@ -203,6 +204,11 @@ export default function TranslateSettings({
                 </option>
               ))}
             </select>
+            {migrationNotices.length > 0 ? (
+              <p className="form-hint form-hint--migration" role="status">
+                {migrationNotices.join(" ")}
+              </p>
+            ) : null}
             <p className="form-hint">
               Faster models keep the extension snappy. Larger models usually
               read tone and context better.
