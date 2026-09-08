@@ -1,11 +1,59 @@
-// MyMemory response handling shared by the extension's translation client
-// and the website's demo pipeline, so the two cannot drift on how quota
-// exhaustion or an error status is reported.
+// MyMemory contract shared by the extension's translation client and the
+// website's demo pipeline, so the two cannot drift on request sizing, the
+// source-language rule, or how quota exhaustion and error statuses are
+// reported.
+//
+// Spec (https://mymemory.translated.net/doc/spec.php, read 2026-09-07):
+//   q        "Max 500 bytes", UTF-8
+//   langpair "Source and language pair, separated by the | symbol. Use ISO
+//            standard names or RFC3066". No automatic-detection value is
+//            documented, and community reports say "autodetect" is answered
+//            with an invalid-source-language error, so a source language is
+//            always sent explicitly here.
 
 import { isEffectivelyIdenticalTranslation } from './text.js';
+import { utf8ByteLength } from './text-chunking.js';
+import { detectSourceLanguage, normalizeLanguageCode } from './language-detection.js';
 
-// MyMemory rejects segments longer than this; longer text is chunked.
-export const MYMEMORY_CHAR_LIMIT = 500;
+// MyMemory rejects segments larger than this many UTF-8 bytes; longer text
+// is chunked with chunkTextByBytes().
+export const MYMEMORY_BYTE_LIMIT = 500;
+
+export function exceedsMyMemoryLimit(text) {
+  return utf8ByteLength(text) > MYMEMORY_BYTE_LIMIT;
+}
+
+/*
+ * The source language to send for one text. An explicit user choice wins.
+ * "auto" is resolved from the text's script or stop words; when that is not
+ * decisive the error names the fix (choose a source language) instead of
+ * guessing one, because a wrong pair silently yields nonsense.
+ */
+export function resolveMyMemorySourceLanguage(sourceLang, text) {
+  const normalized = normalizeLanguageCode(sourceLang);
+
+  if (normalized && normalized !== 'auto') {
+    return { language: normalized, detected: false, reason: 'explicit' };
+  }
+
+  const detection = detectSourceLanguage(text);
+  if (detection.language) {
+    return { language: detection.language, detected: true, reason: detection.reason };
+  }
+
+  const hint =
+    detection.reason === 'han-only-ambiguous'
+      ? 'The text uses only Han characters, which can be Chinese or Japanese.'
+      : 'The text does not carry enough evidence of one language.';
+  throw new Error(
+    `MyMemory needs an explicit source language (it has no auto-detect). ${hint} ` +
+      'Choose the source language in the extension settings, or use an LLM provider.'
+  );
+}
+
+export function buildMyMemoryLangPair(sourceLanguage, targetLang) {
+  return `${sourceLanguage}|${String(targetLang || '').trim()}`;
+}
 
 /*
  * MyMemory answers HTTP 200 for almost everything and reports the real

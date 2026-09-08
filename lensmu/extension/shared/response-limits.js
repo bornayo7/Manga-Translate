@@ -1,3 +1,11 @@
+export class ResponseTooLargeError extends Error {
+  constructor(maxBytes) {
+    super(`Response exceeds the ${maxBytes}-byte limit.`);
+    this.name = 'ResponseTooLargeError';
+    this.maxBytes = maxBytes;
+  }
+}
+
 export async function readResponseBytesWithLimit(response, maxBytes) {
   const byteLimit = Number(maxBytes);
   if (!Number.isInteger(byteLimit) || byteLimit < 1) {
@@ -6,13 +14,13 @@ export async function readResponseBytesWithLimit(response, maxBytes) {
 
   const declaredLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(declaredLength) && declaredLength > byteLimit) {
-    throw new Error(`Response exceeds the ${byteLimit}-byte limit.`);
+    throw new ResponseTooLargeError(byteLimit);
   }
 
   if (!response.body?.getReader) {
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength > byteLimit) {
-      throw new Error(`Response exceeds the ${byteLimit}-byte limit.`);
+      throw new ResponseTooLargeError(byteLimit);
     }
     return bytes;
   }
@@ -30,7 +38,7 @@ export async function readResponseBytesWithLimit(response, maxBytes) {
       totalBytes += value.byteLength;
       if (totalBytes > byteLimit) {
         await reader.cancel('Response exceeds byte limit.');
-        throw new Error(`Response exceeds the ${byteLimit}-byte limit.`);
+        throw new ResponseTooLargeError(byteLimit);
       }
       chunks.push(value);
     }
