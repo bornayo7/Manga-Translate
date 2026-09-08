@@ -147,8 +147,6 @@ function setOverlayVisibility(canvas, isVisible) {
  */
 let imageOverlays = new WeakMap();
 
-let imageProcessIds = new WeakMap();
-
 /*
  * Per-image runtime state. Visible overlays are only allowed after an
  * explicit click path marks clicked = true.
@@ -161,7 +159,6 @@ let imageProcessIds = new WeakMap();
  *   settingsSignature: string,
  *   imageInfo: { element, type, url },
  *   activeJob: { id: string, controller: AbortController, reason: string } | null,
- *   lastJobResult: 'idle' | 'running' | 'prepared' | 'rendered' | 'failed' | 'cancelled' | 'skipped',
  *   prepared: {
  *     imageBase64,
  *     rawOcrResults,
@@ -180,15 +177,103 @@ let imageStates = new WeakMap();
 /* Reference to the MutationObserver so we can disconnect it on deactivate */
 let pageObserver = null;
 
-/* Reference to the toolbar shadow DOM container */
-
 /*
  * Set of translate-icon buttons we've added to images, so we can
- * remove them on deactivate.
+ * remove them on deactivate. Controls for images the page removed are
+ * released by releaseImageTarget() so this never pins detached DOM.
  */
 const translateIcons = new Set();
 const mutatedElementStyles = new Map();
 let activeReadAloudSession = null;
+
+/*
+ * Every activation and deactivation bumps this. Work started under an
+ * older generation (a batch loop that was mid-flight when the user turned
+ * the extension off, a prefetch queued by the observer) checks it before
+ * starting anything new and after every await, so nothing dequeues,
+ * fetches or paints after deactivate().
+ */
+let activationGeneration = 0;
+
+/* Jobs whose controller must be aborted on deactivation or cleanup. */
+const activeJobs = new Set();
+
+/* <img> elements still loading, each with the listener that will rescan. */
+const pendingLoadListeners = new Map();
+
+/*
+ * Read-aloud requests are numbered; only the newest number may start
+ * playback. Stop, disabling read-aloud, cleanup and every new click bump
+ * it, so a generation that resolves late finds itself superseded.
+ */
+let readAloudRequestSerial = 0;
+
+/*
+ * One queue for every image job on the page, so the configured
+ * parallel-image limit applies per page rather than per caller. The queue
+ * itself lives in shared/image-work-queue.js; it is created on the first
+ * activation and kept for the life of the content script.
+ */
+const PRIORITY_CLICK = 2;
+const PRIORITY_PREFETCH = 1;
+let imageWorkQueue = null;
+let translationOutcomes = null;
+
+/*
+ * A content script is a classic script, so the shared modules it needs are
+ * pulled in once at activation rather than awaited inside the per-image
+ * pipeline — an import on that path adds a tick to every image and makes
+ * the ordering harder to reason about for no gain.
+ */
+async function ensureSharedModules() {
+  if (!imageWorkQueue) {
+    const { createImageWorkQueue } = await import(
+      chrome.runtime.getURL('shared/image-work-queue.js')
+    );
+    imageWorkQueue = createImageWorkQueue({
+      getLimit: getMaxConcurrentImages,
+      isRunnable: (entry) => isActive && isConnectedElement(entry.element)
+    });
+  }
+
+  if (!translationOutcomes) {
+    translationOutcomes = await import(
+      chrome.runtime.getURL('shared/translation-outcomes.js')
+    );
+  }
+}
+
+/*
+ * The identity of one unit of work: this activation, this mode, this
+ * element's current source. Anything that changes makes it a different
+ * job rather than a reused result — a click must never be handed an
+ * in-flight prefetch's promise, and a src swap must start fresh work.
+ */
+function getImageWorkKey(imageInfo, mode) {
+  return `${activationGeneration}::${mode}::${getImageSourceKey(imageInfo)}`;
+}
+
+function scheduleImageWork(imageInfo, mode, priority, task) {
+  if (!imageWorkQueue) {
+    return Promise.resolve(null);
+  }
+  return imageWorkQueue.schedule(getImageWorkKey(imageInfo, mode), imageInfo.element, priority, task);
+}
+
+function dropQueuedImageWork(element = null) {
+  imageWorkQueue?.drop(element);
+}
+
+/* Size of the bookkeeping that must return to zero after a page cleanup. */
+function getTrackedStateCount() {
+  return (
+    translateIcons.size +
+    mutatedElementStyles.size +
+    pendingLoadListeners.size +
+    activeJobs.size +
+    (imageWorkQueue?.size || 0)
+  );
+}
 
 function rememberOriginalInlineStyle(element) {
   if (!element || mutatedElementStyles.has(element)) {
@@ -294,6 +379,19 @@ function getReadAloudSettingsSignature(settings = currentSettings) {
   });
 }
 
+/*
+ * Raised by a running job's checkpoints once its result is unwanted. It
+ * carries the checkpoint's reason so the one catch arm that handles it can
+ * report where the job stopped.
+ */
+class JobStoppedError extends Error {
+  constructor(reason) {
+    super('Image job stopped: ' + reason);
+    this.name = 'JobStoppedError';
+    this.reason = reason;
+  }
+}
+
 function isConnectedElement(element) {
   return Boolean(element && element.isConnected);
 }
@@ -345,29 +443,6 @@ function getTranslateControl(imageElement) {
   }
 
   return null;
-}
-
-function normalizeForComparison(text) {
-  return String(text || '')
-    .normalize('NFKC')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function isEffectivelyIdenticalTranslation(sourceText, translatedText) {
-  return normalizeForComparison(sourceText) === normalizeForComparison(translatedText);
-}
-
-function languagesClearlyDiffer(sourceLang, targetLang) {
-  const normalizedSource = normalizeForComparison(sourceLang);
-  const normalizedTarget = normalizeForComparison(targetLang);
-
-  if (!normalizedSource || !normalizedTarget || normalizedSource === 'auto') {
-    return false;
-  }
-
-  return normalizedSource !== normalizedTarget;
 }
 
 function clearTranslationFailureNotice(imageElement) {
@@ -450,7 +525,14 @@ function updateOverlayReadAloudState(imageElement, state, errorMessage = '') {
   setReadAloudButtonState(control, state, errorMessage);
 }
 
+/*
+ * Stops whatever is playing and supersedes every pending generation: a
+ * request that resolves after this call finds a newer serial and does not
+ * start playback.
+ */
 function stopActiveReadAloudPlayback() {
+  readAloudRequestSerial += 1;
+
   if (!activeReadAloudSession) {
     return;
   }
@@ -504,8 +586,21 @@ async function handleReadAloudClick(imageElement) {
     return;
   }
 
+  /*
+   * Stop anything playing (which also supersedes older pending requests),
+   * then take this request's serial. Every await below re-checks it: the
+   * user may have pressed Stop, clicked another image, changed voice
+   * settings or turned read-aloud off while the provider was working.
+   */
   stopActiveReadAloudPlayback();
+  const requestSerial = readAloudRequestSerial;
   updateOverlayReadAloudState(imageElement, 'generating');
+
+  const isSuperseded = () =>
+    requestSerial !== readAloudRequestSerial ||
+    !isActive ||
+    !currentSettings.enableReadAloud ||
+    imageOverlays.get(imageElement) !== overlay;
 
   try {
     const currentSignature = getReadAloudSettingsSignature();
@@ -522,6 +617,14 @@ async function handleReadAloudClick(imageElement) {
         }
       });
 
+      if (isSuperseded()) {
+        logImageLifecycle('read aloud result discarded (superseded)', getImageState(imageElement)?.imageInfo);
+        if (imageOverlays.get(imageElement) === overlay && overlay.readAloud?.state === 'generating') {
+          updateOverlayReadAloudState(imageElement, 'stopped');
+        }
+        return;
+      }
+
       if (!response?.ok) {
         throw new Error(response?.body?.error || 'Could not generate read aloud audio.');
       }
@@ -536,14 +639,24 @@ async function handleReadAloudClick(imageElement) {
       };
     }
 
-    if (!currentSettings.enableReadAloud || imageOverlays.get(imageElement) !== overlay) {
-      updateOverlayReadAloudState(imageElement, 'stopped');
+    if (isSuperseded()) {
+      if (imageOverlays.get(imageElement) === overlay) {
+        updateOverlayReadAloudState(imageElement, 'stopped');
+      }
       return;
     }
 
     if (!audioDataUrl) {
       throw new Error('No audio was returned for this translation.');
     }
+
+    /*
+     * Nothing else may be audible when the accepted result starts. This
+     * stop bumps the serial, so re-take it: the checks after play() below
+     * compare against the value this request now owns.
+     */
+    stopActiveReadAloudPlayback();
+    const playbackSerial = readAloudRequestSerial;
 
     const audio = overlay.readAloud?.audio || new Audio();
     audio.pause();
@@ -572,6 +685,16 @@ async function handleReadAloudClick(imageElement) {
     activeReadAloudSession = { imageElement, audio };
     updateOverlayReadAloudState(imageElement, 'playing');
     await audio.play();
+
+    if (playbackSerial !== readAloudRequestSerial) {
+      /* Stop was pressed while play() was starting up. */
+      audio.pause();
+      audio.currentTime = 0;
+      if (activeReadAloudSession?.audio === audio) {
+        activeReadAloudSession = null;
+      }
+      updateOverlayReadAloudState(imageElement, 'stopped');
+    }
   } catch (error) {
     if (isExtensionContextInvalidated(error)) {
       console.warn('[VisionTranslate] Read aloud playback cancelled:', error?.message || String(error));
@@ -805,14 +928,18 @@ function isCrossOriginHttpUrl(url) {
   }
 }
 
-async function fetchImageViaBackground(url) {
+async function fetchImageViaBackground(url, requestId = null) {
   if (!url) return null;
 
   try {
     const fetchResponse = await safeSendMessage({
       action: 'FETCH_IMAGE',
-      payload: { url }
+      payload: { url, requestId }
     });
+
+    if (fetchResponse?.cancelled) {
+      return null;
+    }
 
     if (fetchResponse?.ok && fetchResponse.dataUrl) {
       return fetchResponse.dataUrl;
@@ -913,6 +1040,38 @@ function loadImage(url) {
   });
 }
 
+/*
+ * The image descriptor as it is *now*. Controls are created at discovery
+ * time, but a page may later swap the element's src/srcset (lazy loading,
+ * responsive sources, carousels), so every click and every job start
+ * re-reads the live source instead of trusting the descriptor the control
+ * was created with.
+ */
+function resolveLiveImageInfo(imageInfo) {
+  const element = imageInfo?.element;
+  const type = imageInfo?.type;
+
+  if (!element) {
+    return imageInfo;
+  }
+
+  if (type === 'img') {
+    return { element, type, url: element.currentSrc || element.src || '' };
+  }
+
+  if (type === 'background') {
+    let url = imageInfo.url;
+    try {
+      url = getBackgroundImageUrl(element) || imageInfo.url;
+    } catch (_error) {
+      /* detached or unstyled element: keep the last known URL */
+    }
+    return { element, type, url };
+  }
+
+  return { element, type, url: null };
+}
+
 function getImageSourceKey(imageInfo) {
   const { element, type, url } = imageInfo;
 
@@ -931,6 +1090,13 @@ function getImageSourceKey(imageInfo) {
     element?.naturalWidth || element?.offsetWidth || 0,
     element?.naturalHeight || element?.offsetHeight || 0
   ].join('::');
+}
+
+function hasImageSourceChanged(imageState) {
+  if (!imageState?.imageInfo?.element) {
+    return false;
+  }
+  return getImageSourceKey(resolveLiveImageInfo(imageState.imageInfo)) !== imageState.sourceKey;
 }
 
 function getTranslationSettingsSignature(settings = currentSettings) {
@@ -978,11 +1144,7 @@ function resetTranslateControl(control) {
   }
 
   clearTranslationFailureNotice(control.element);
-  control.icon.innerHTML = '文A';
-  control.icon.style.background = 'rgba(59, 130, 246, 0.9)';
-  control.icon.style.animation = 'none';
-  control.icon.style.opacity = '1';
-  delete control.icon.dataset.translating;
+  setControlIconState(control.icon, 'idle');
   removeReadAloudButton(control);
 }
 
@@ -994,15 +1156,33 @@ function createImageState(imageInfo) {
     settingsSignature: '',
     imageInfo,
     activeJob: null,
-    lastJobResult: 'idle',
     prepared: null,
     preparePromise: null
   };
 }
 
+/*
+ * Tells the service worker to abort the fetches a job started. Best
+ * effort: the worker frees its connections, but an inference the backend
+ * already began cannot be recalled from here.
+ */
+function cancelJobRequests(job) {
+  if (!job?.requestIds?.size || !hasLiveExtensionContext()) {
+    return;
+  }
+  const requestIds = [...job.requestIds];
+  job.requestIds.clear();
+  void safeSendMessage({ action: 'CANCEL_REQUESTS', payload: { requestIds } }).catch(() => undefined);
+}
+
+function registerJobRequest(job) {
+  const requestId = `${job?.id || 'job'}-${Math.random().toString(36).slice(2)}`;
+  job?.requestIds?.add(requestId);
+  return requestId;
+}
+
 function cancelImageTranslationJob(imageState, reason = 'translation-cancelled') {
   const activeJob = imageState?.activeJob;
-  const element = imageState?.imageInfo?.element;
 
   if (!activeJob) {
     return;
@@ -1011,17 +1191,11 @@ function cancelImageTranslationJob(imageState, reason = 'translation-cancelled')
   if (!activeJob.controller.signal.aborted) {
     activeJob.controller.abort(reason);
   }
-
-  if (element && imageProcessIds.get(element) === activeJob.id) {
-    imageProcessIds.delete(element);
-  }
+  cancelJobRequests(activeJob);
+  activeJobs.delete(activeJob);
 
   if (imageState.activeJob === activeJob) {
     imageState.activeJob = null;
-
-    if (imageState.lastJobResult === 'running') {
-      imageState.lastJobResult = 'cancelled';
-    }
   }
 }
 
@@ -1029,17 +1203,15 @@ function startImageTranslationJob(imageState, reason = 'translation-started') {
   cancelImageTranslationJob(imageState, reason);
 
   const job = {
-    id: `${Date.now()}-${Math.random()}`,
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     controller: new AbortController(),
-    reason
+    reason,
+    generation: activationGeneration,
+    requestIds: new Set()
   };
 
   imageState.activeJob = job;
-  imageState.lastJobResult = 'running';
-
-  if (imageState.imageInfo?.element) {
-    imageProcessIds.set(imageState.imageInfo.element, job.id);
-  }
+  activeJobs.add(job);
 
   return job;
 }
@@ -1051,8 +1223,8 @@ function isCurrentImageTranslationJob(imageState, job) {
     job &&
     element &&
     imageState.activeJob === job &&
-    imageProcessIds.get(element) === job.id &&
-    !job.controller.signal.aborted
+    !job.controller.signal.aborted &&
+    job.generation === activationGeneration
   );
 }
 
@@ -1060,46 +1232,48 @@ function cancelImageTranslationJobResult(imageState, job, reason = 'translation-
   if (job && !job.controller.signal.aborted) {
     job.controller.abort(reason);
   }
-
-  if (imageState) {
-    imageState.lastJobResult = 'cancelled';
-  }
+  cancelJobRequests(job);
+  activeJobs.delete(job);
 
   if (imageState?.activeJob === job) {
-    const element = imageState.imageInfo?.element;
-
-    if (element && imageProcessIds.get(element) === job.id) {
-      imageProcessIds.delete(element);
-    }
-
     imageState.activeJob = null;
-    imageState.lastJobResult = 'cancelled';
   }
 
-  return null;
+  return { status: 'cancelled', reason };
 }
 
-function finalizeImageTranslationJob(imageState, job, result) {
-  if (!isCurrentImageTranslationJob(imageState, job)) {
-    return;
+function finalizeImageTranslationJob(imageState, job) {
+  activeJobs.delete(job);
+
+  if (isCurrentImageTranslationJob(imageState, job)) {
+    imageState.activeJob = null;
   }
-
-  const element = imageState.imageInfo?.element;
-
-  if (element) {
-    imageProcessIds.delete(element);
-  }
-
-  imageState.activeJob = null;
-  imageState.lastJobResult = result;
 }
 
+/*
+ * Everything that makes a running job's result unwanted: the extension was
+ * reloaded, the page removed the image, the user deactivated (generation
+ * changed), a newer job superseded this one, or the image's source moved
+ * on while we were fetching the old one.
+ */
 function shouldCancelImageTranslationJob(imageState, job) {
   return (
     !hasLiveExtensionContext() ||
+    !isActive ||
     !isConnectedElement(imageState?.imageInfo?.element) ||
-    !isCurrentImageTranslationJob(imageState, job)
+    !isCurrentImageTranslationJob(imageState, job) ||
+    hasImageSourceChanged(imageState)
   );
+}
+
+function cancelAllImageJobs(reason) {
+  for (const job of [...activeJobs]) {
+    if (!job.controller.signal.aborted) {
+      job.controller.abort(reason);
+    }
+    cancelJobRequests(job);
+    activeJobs.delete(job);
+  }
 }
 
 function ensureImageState(imageInfo) {
@@ -1133,8 +1307,6 @@ function invalidateImageState(imageElement, reason = 'invalidated') {
 
   if (imageState) {
     cancelImageTranslationJob(imageState, reason);
-  } else {
-    imageProcessIds.delete(imageElement);
   }
 
   removeOverlayForElement(imageElement);
@@ -1152,8 +1324,141 @@ function invalidateImageState(imageElement, reason = 'invalidated') {
   imageState.preparePromise = null;
   imageState.settingsSignature = '';
   imageState.activeJob = null;
-  imageState.lastJobResult = 'idle';
   setImageLifecycleState(imageState, 'icon-ready', { reason });
+}
+
+/*
+ * Forgets an image the page removed: its job, control, overlay, style
+ * record, pending load listener and queued work. The inline style is
+ * dropped rather than restored — the host removed the element, so what it
+ * had before is no longer ours to reinstate. Called only for elements
+ * that are no longer connected at flush time; an element the extension or
+ * the host merely re-parented is connected again by then and untouched.
+ */
+function releaseImageTarget(element, reason = 'image-removed') {
+  const imageState = imageStates.get(element);
+  const control = getTranslateControl(element);
+
+  if (imageState) {
+    cancelImageTranslationJob(imageState, reason);
+    imageState.prepared = null;
+    imageState.preparePromise = null;
+  }
+  dropQueuedImageWork(element);
+  imageStates.delete(element);
+
+  if (activeReadAloudSession?.imageElement === element) {
+    stopActiveReadAloudPlayback();
+  }
+  const overlay = imageOverlays.get(element);
+  if (overlay) {
+    overlay.wrapper?.remove?.();
+    overlay.canvas?.remove?.();
+    imageOverlays.delete(element);
+  }
+
+  if (control) {
+    control.iconContainer?.remove?.();
+    control.icon?.remove?.();
+    control.failureNotice?.remove?.();
+    control.readAloudButton?.remove?.();
+    translateIcons.delete(control);
+  }
+
+  mutatedElementStyles.delete(element);
+  unwatchImageLoad(element);
+  if (element?.dataset) {
+    delete element.dataset.vtIconAdded;
+  }
+
+  logImageLifecycle('image released', imageState?.imageInfo || { element }, { reason });
+}
+
+/* Releases every tracked target the page has removed since the last flush. */
+function releaseDisconnectedTargets() {
+  let released = 0;
+  for (const control of [...translateIcons]) {
+    if (!isConnectedElement(control.element)) {
+      releaseImageTarget(control.element, 'image-removed');
+      released += 1;
+    }
+  }
+  for (const element of [...mutatedElementStyles.keys()]) {
+    if (!isConnectedElement(element)) {
+      mutatedElementStyles.delete(element);
+    }
+  }
+  for (const element of [...pendingLoadListeners.keys()]) {
+    if (!isConnectedElement(element)) {
+      unwatchImageLoad(element);
+    }
+  }
+  return released;
+}
+
+/*
+ * An <img> that has not finished loading has no natural size yet, so
+ * discovery skips it; its later load fires no DOM mutation, so the
+ * observer would never revisit it. Listen for that load (or a retry after
+ * an error) and run the same debounced discovery the observer uses.
+ */
+function watchImageLoad(img) {
+  if (!img || pendingLoadListeners.has(img)) {
+    return;
+  }
+
+  const handler = () => {
+    if (!isActive) {
+      unwatchImageLoad(img);
+      return;
+    }
+    if (img.complete && img.naturalWidth > 0) {
+      unwatchImageLoad(img);
+      scheduleDiscoveryRefresh('image-loaded');
+    }
+    /* On error keep listening: a src replacement will fire load again. */
+  };
+
+  img.addEventListener('load', handler);
+  img.addEventListener('error', handler);
+  pendingLoadListeners.set(img, handler);
+}
+
+function unwatchImageLoad(img) {
+  const handler = pendingLoadListeners.get(img);
+  if (!handler) {
+    return;
+  }
+  img.removeEventListener('load', handler);
+  img.removeEventListener('error', handler);
+  pendingLoadListeners.delete(img);
+}
+
+/* True for nodes the extension created (wrappers, controls, overlays). */
+function isExtensionNode(node) {
+  if (!node || node.nodeType !== 1) {
+    return false;
+  }
+  if (node.id && String(node.id).startsWith(CLASS_PREFIX)) {
+    return true;
+  }
+  for (const className of node.classList || []) {
+    if (className.startsWith(`${CLASS_PREFIX}-`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isInsideExtensionNode(node) {
+  let current = node;
+  while (current) {
+    if (isExtensionNode(current)) {
+      return true;
+    }
+    current = current.parentElement || null;
+  }
+  return false;
 }
 
 function blockOverlayRenderBecauseNoClick(imageState, reason) {
@@ -1191,11 +1496,14 @@ function scanForImages() {
   for (const img of imgElements) {
     /*
      * Skip images that haven't loaded yet. naturalWidth/naturalHeight
-     * are 0 for unloaded images or broken image links.
+     * are 0 for unloaded images or broken image links. Their eventual
+     * load fires no DOM mutation, so watch for it explicitly.
      */
     if (!img.naturalWidth || !img.naturalHeight) {
+      watchImageLoad(img);
       continue;
     }
+    unwatchImageLoad(img);
 
     /* Skip images smaller than our minimum threshold */
     if (img.naturalWidth < minWidth || img.naturalHeight < minHeight) {
@@ -1508,10 +1816,92 @@ function removeOverlay(imageElement) {
  * @param {{element: HTMLElement, type: string, url: string|null}} imageInfo
  *        The image descriptor from scanForImages()
  */
-async function prepareImageForTranslation(imageInfo, options = { reason: 'click' }) {
+/*
+ * The image's pixels as a data URL, by whichever route this element allows:
+ * a canvas exports itself, a cross-origin <img> goes through the service
+ * worker (which has host permissions the page does not), a CSS background
+ * tries a CORS load first. Same-origin content and anything whose canvas
+ * read failed fall back to the worker once, and only once.
+ *
+ * Returns { bytes } or { bytes: null, reason, message } — a tainted canvas
+ * is reported separately from "no route worked" because the user can do
+ * nothing about the former.
+ */
+async function acquireImageBytes(imageInfo, { job, prefersBackgroundFetch, throwIfStopped }) {
+  const { element, type, url } = imageInfo;
+  let bytes = null;
+
+  if (type === 'canvas') {
+    try {
+      return { bytes: element.toDataURL('image/png') };
+    } catch (error) {
+      console.warn('[VisionTranslate] Cannot export canvas (tainted):', error.message);
+      return { bytes: null, reason: 'canvas-tainted', message: error.message };
+    }
+  }
+
+  if (prefersBackgroundFetch) {
+    throwIfStopped('background-fetch-cancelled');
+    bytes = await fetchImageViaBackground(url, registerJobRequest(job));
+    throwIfStopped('background-fetch-cancelled');
+
+    /*
+     * The background fetch is cookieless, so an image behind a login comes
+     * back 401/403 even though the page itself displays it. If the page
+     * loaded it with a crossorigin attribute and the host answered with
+     * CORS headers, the pixels can still be read straight off the element.
+     * Without the attribute the canvas is tainted for certain, so skip the
+     * full-resolution draw that would only throw.
+     */
+    if (!bytes && type === 'img' && element.crossOrigin) {
+      bytes = imageToBase64(element);
+    }
+  } else if (type === 'background') {
+    try {
+      throwIfStopped('background-image-load-cancelled');
+      const loadedImg = await loadImage(url);
+      throwIfStopped('background-image-load-cancelled');
+      bytes = imageToBase64(loadedImg);
+    } catch (error) {
+      /* A cancelled job is not a failed load: it must not be retried. */
+      if (error instanceof JobStoppedError) {
+        throw error;
+      }
+      console.warn('[VisionTranslate] Could not load background image via CORS, trying background fetch:', url?.substring(0, 80));
+    }
+  } else {
+    bytes = imageToBase64(element);
+  }
+
+  /*
+   * Last resort for same-origin images and CSS backgrounds whose canvas
+   * read failed (SVG with foreignObject, a failed CORS load). Cross-origin
+   * <img> elements already tried this exact fetch above, so do not repeat a
+   * request that just failed.
+   */
+  if (!bytes && url && !prefersBackgroundFetch) {
+    throwIfStopped('fallback-background-fetch-cancelled');
+    bytes = await fetchImageViaBackground(url, registerJobRequest(job));
+    throwIfStopped('fallback-background-fetch-cancelled');
+  }
+
+  return bytes ? { bytes } : { bytes: null, reason: 'image-unreadable' };
+}
+
+async function prepareImageForTranslation(discoveredImageInfo, options = { reason: 'click' }) {
+  /*
+   * Work from the element's current source, not the one the control was
+   * created with: ensureImageState() then invalidates any state (and any
+   * running job) that belonged to a previous source.
+   */
+  const imageInfo = resolveLiveImageInfo(discoveredImageInfo);
   const { element, type, url } = imageInfo;
   const imageState = ensureImageState(imageInfo);
   const isPrefetch = options.reason === 'prefetch';
+
+  if (!isActive) {
+    return { status: 'cancelled', reason: 'inactive' };
+  }
   const settingsSnapshot = { ...(currentSettings || {}) };
   const settingsSignature = getTranslationSettingsSignature(settingsSnapshot);
   let currentJob = null;
@@ -1536,8 +1926,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       blockOverlayRenderBecauseNoClick(imageState, 'cached-prefetch-result');
     }
 
-    imageState.lastJobResult = 'prepared';
-    return imageState.prepared;
+    return { status: 'prepared', reason: 'cached', prepared: imageState.prepared };
   }
 
   if (imageState.preparePromise) {
@@ -1555,16 +1944,27 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
   preparePromise = (async () => {
     let imageBase64 = null;
     const prefersBackgroundFetch = isCrossOriginHttpUrl(url);
-    const createFailureResult = (result = 'failed') => {
-      finalizeImageTranslationJob(imageState, currentJob, result);
-      return null;
+    /*
+     * Ends the job without a rendered result. `status` distinguishes the
+     * neutral outcomes (no text in the image, every block already in the
+     * target language) from a real failure, so the control can show "—"
+     * instead of a red ✗ for an image that simply had nothing to do.
+     */
+    /* Ends the job with no rendered result, reporting why. */
+    const endWithout = (outcome) => {
+      finalizeImageTranslationJob(imageState, currentJob);
+      return outcome;
     };
-    const bailIfJobStopped = (reason) => {
+    /*
+     * Raised after an await when the job's result is no longer wanted. It
+     * unwinds to the single catch arm below, which turns it into the
+     * cancelled outcome — rather than each of the nineteen checkpoints
+     * repeating that conversion inline.
+     */
+    const throwIfJobStopped = (reason) => {
       if (shouldCancelImageTranslationJob(imageState, currentJob)) {
-        return cancelImageTranslationJobResult(imageState, currentJob, reason);
+        throw new JobStoppedError(reason);
       }
-
-      return undefined;
     };
 
     currentJob = startImageTranslationJob(
@@ -1572,90 +1972,44 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       isPrefetch ? 'background-preprocess-started' : 'click-translation-started'
     );
 
-    if (bailIfJobStopped('translation-start-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('translation-start-cancelled');
 
-    if (type === 'canvas') {
-      try {
-        imageBase64 = element.toDataURL('image/png');
-      } catch (e) {
-        console.warn('[VisionTranslate] Cannot export canvas (tainted):', e.message);
-        return createFailureResult();
-      }
-    } else if (prefersBackgroundFetch) {
-      if (bailIfJobStopped('background-fetch-cancelled') === null) {
-        return null;
-      }
-      imageBase64 = await fetchImageViaBackground(url);
-      if (bailIfJobStopped('background-fetch-cancelled') === null) {
-        return null;
-      }
+    const acquired = await acquireImageBytes(imageInfo, {
+      job: currentJob,
+      prefersBackgroundFetch,
+      throwIfStopped: throwIfJobStopped
+    });
 
-      /*
-       * The background fetch is cookieless, so an image behind a login
-       * comes back 401/403 even though the page itself displays it. If the
-       * page loaded it with a crossorigin attribute and the host answered
-       * with CORS headers, the pixels can still be read straight off the
-       * element. Without the attribute the canvas is tainted for certain,
-       * so skip the full-resolution draw that would only throw.
-       */
-      if (!imageBase64 && type === 'img' && element.crossOrigin) {
-        imageBase64 = imageToBase64(element);
-      }
-    } else if (type === 'background') {
-      try {
-        if (bailIfJobStopped('background-image-load-cancelled') === null) {
-          return null;
-        }
-        const loadedImg = await loadImage(url);
-        if (bailIfJobStopped('background-image-load-cancelled') === null) {
-          return null;
-        }
-        imageBase64 = imageToBase64(loadedImg);
-      } catch (e) {
-        console.warn('[VisionTranslate] Could not load background image via CORS, trying background fetch:', url?.substring(0, 80));
-      }
-    } else {
-      imageBase64 = imageToBase64(element);
-    }
-
-    /*
-     * Last resort for same-origin images and CSS backgrounds whose canvas
-     * read failed (SVG with foreignObject, a failed CORS load). Cross-origin
-     * <img> elements already tried this exact fetch above, so do not repeat
-     * a request that just failed.
-     */
-    if (!imageBase64 && url && !prefersBackgroundFetch) {
-      if (bailIfJobStopped('fallback-background-fetch-cancelled') === null) {
-        return null;
-      }
-      imageBase64 = await fetchImageViaBackground(url);
-      if (bailIfJobStopped('fallback-background-fetch-cancelled') === null) {
-        return null;
-      }
-    }
-
-    if (!imageBase64) {
+    if (!acquired.bytes) {
+      const message =
+        acquired.reason === 'canvas-tainted'
+          ? acquired.message
+          : 'the image pixels could not be read (cross-origin image without CORS access)';
       console.warn('[VisionTranslate] Failed to convert image to base64. Skipping.');
-      return createFailureResult();
+      if (!isPrefetch && acquired.reason !== 'canvas-tainted') {
+        showTranslationFailureNotice(element, `Translation failed: ${message}.`);
+      }
+      return endWithout({ status: 'failed', reason: acquired.reason, message: acquired.message || '' });
     }
 
-    if (bailIfJobStopped('ocr-request-cancelled') === null) {
-      return null;
-    }
+    imageBase64 = acquired.bytes;
+
+    throwIfJobStopped('ocr-request-cancelled');
 
     const ocrResponse = await safeSendMessage({
       action: 'OCR_REQUEST',
       payload: {
         imageBase64,
-        sourceLang: settingsSnapshot.sourceLanguage || 'auto'
+        sourceLang: settingsSnapshot.sourceLanguage || 'auto',
+        requestId: registerJobRequest(currentJob)
       }
     });
 
-    if (bailIfJobStopped('ocr-response-stale') === null) {
-      return null;
+    if (ocrResponse?.cancelled) {
+      return cancelImageTranslationJobResult(imageState, currentJob, 'ocr-request-cancelled');
     }
+
+    throwIfJobStopped('ocr-response-stale');
 
     if (!ocrResponse || !ocrResponse.ok) {
       console.warn('[VisionTranslate] OCR request failed:', ocrResponse?.body?.error || 'Unknown error');
@@ -1665,7 +2019,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
           `Translation failed: ${ocrResponse?.body?.error || 'OCR request failed.'}`
         );
       }
-      return createFailureResult();
+      return endWithout({ status: 'failed', reason: 'ocr-failed', message: ocrResponse?.body?.error || '' });
     }
 
     let rawOcrResults = ocrResponse.body?.blocks || [];
@@ -1673,25 +2027,24 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       const sourceLang = ocrResponse.body?.source_lang || settingsSnapshot.sourceLanguage || 'auto';
       console.log('[VisionTranslate] Running bundled Tesseract OCR in content script.');
       try {
-        if (bailIfJobStopped('client-ocr-cancelled') === null) {
-          return null;
-        }
+        throwIfJobStopped('client-ocr-cancelled');
         rawOcrResults = await runBundledTesseractOCR(imageBase64, sourceLang);
-        if (bailIfJobStopped('client-ocr-cancelled') === null) {
-          return null;
-        }
+        throwIfJobStopped('client-ocr-cancelled');
       } catch (tessError) {
+        if (tessError instanceof JobStoppedError) {
+          throw tessError;
+        }
         console.warn('[VisionTranslate] Bundled Tesseract.js OCR failed:', tessError.message);
         if (!isPrefetch) {
           showTranslationFailureNotice(element, `Translation failed: ${tessError.message}`);
         }
-        return createFailureResult();
+        return endWithout({ status: 'failed', reason: 'ocr-failed', message: tessError.message });
       }
     }
 
     if (rawOcrResults.length === 0) {
       console.log('[VisionTranslate] No text found in image. Skipping.');
-      return createFailureResult('skipped');
+      return endWithout({ status: 'no-text', reason: 'no-text' });
     }
 
     console.log(`[VisionTranslate] OCR found ${rawOcrResults.length} raw text boxes`);
@@ -1702,20 +2055,16 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       blockCount: rawOcrResults.length
     });
 
-    if (bailIfJobStopped('overlay-module-load-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('overlay-module-load-cancelled');
 
     const overlayModule = await import(chrome.runtime.getURL('overlay.js'));
-    if (bailIfJobStopped('overlay-module-load-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('overlay-module-load-cancelled');
 
     const mergedOcrResults = overlayModule.groupTextBlocks(rawOcrResults);
 
     if (mergedOcrResults.length === 0) {
       console.log('[VisionTranslate] OCR merge step produced no renderable text blocks. Skipping.');
-      return createFailureResult('skipped');
+      return endWithout({ status: 'no-text', reason: 'no-renderable-blocks' });
     }
 
     console.log(
@@ -1732,22 +2081,23 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       characterCount: textsToTranslate.reduce((total, text) => total + text.length, 0)
     });
 
-    if (bailIfJobStopped('translation-request-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('translation-request-cancelled');
 
     const translateResponse = await safeSendMessage({
       action: 'TRANSLATE_REQUEST',
       payload: {
         texts: textsToTranslate,
         sourceLang: ocrSourceLanguage,
-        targetLang: requestedTargetLanguage
+        targetLang: requestedTargetLanguage,
+        requestId: registerJobRequest(currentJob)
       }
     });
 
-    if (bailIfJobStopped('translation-response-stale') === null) {
-      return null;
+    if (translateResponse?.cancelled) {
+      return cancelImageTranslationJobResult(imageState, currentJob, 'translation-request-cancelled');
     }
+
+    throwIfJobStopped('translation-response-stale');
 
     console.log('[VisionTranslate Content] Raw translation response', {
       ok: Boolean(translateResponse?.ok),
@@ -1767,7 +2117,7 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (!isPrefetch) {
         showTranslationFailureNotice(element, `Translation failed: ${failureMessage}`);
       }
-      return createFailureResult();
+      return endWithout({ status: 'failed', reason: 'translation-failed', message: failureMessage });
     }
 
     const translations = translateResponse.body?.translations || [];
@@ -1789,88 +2139,78 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       if (!isPrefetch) {
         showTranslationFailureNotice(element, 'Translation failed: incomplete provider response.');
       }
-      return createFailureResult();
+      return endWithout({ status: 'failed', reason: 'translation-count-mismatch', message: failureMessage });
     }
 
-    const translationEntries = mergedOcrResults.map((block, index) => {
-      const translation = String(translations[index] || '').trim();
-      return {
-        index,
-        sourceText: block.text,
-        translation,
-        identical: isEffectivelyIdenticalTranslation(block.text, translation)
-      };
-    });
-
-    const allTranslationsEmpty = translationEntries.every((entry) => entry.translation.length === 0);
-    const allTranslationsMatchSource =
-      translationEntries.length > 0 &&
-      translationEntries.every((entry) => entry.translation.length > 0 && entry.identical);
-
-    if (allTranslationsEmpty) {
-      console.error('[VisionTranslate Content] Blocking overlay render because provider returned no translated text', {
-        sourceLang: translatedSourceLanguage,
-        targetLang: targetLanguage,
-        providerRequested: settingsSnapshot.translationProvider || 'libre',
-        providerUsed: translateResponse.body?.provider || null,
-        diagnostics: translateResponse.body?.diagnostics || null
-      });
-      if (!isPrefetch) {
-        showTranslationFailureNotice(element, 'Translation failed: provider returned no translated text.');
-      }
-      return createFailureResult();
-    }
-
-    if (languagesClearlyDiffer(translatedSourceLanguage, targetLanguage) && allTranslationsMatchSource) {
-      console.error('[VisionTranslate Content] Blocking overlay render because every translation matches the source text', {
-        sourceLang: translatedSourceLanguage,
-        targetLang: targetLanguage,
-        providerRequested: settingsSnapshot.translationProvider || 'libre',
-        providerUsed: translateResponse.body?.provider || null,
-        fallbackUsed: Boolean(translateResponse.body?.fallback_used),
-        diagnostics: translateResponse.body?.diagnostics || null
-      });
-      if (!isPrefetch) {
-        showTranslationFailureNotice(element, 'Translation failed: output matched the source text.');
-      }
-      return createFailureResult();
-    }
-
-    console.log('[VisionTranslate Content] Final text passed to overlay rendering', {
+    const verdictDetail = {
       sourceLang: translatedSourceLanguage,
       targetLang: targetLanguage,
       providerRequested: settingsSnapshot.translationProvider || 'libre',
       providerUsed: translateResponse.body?.provider || null,
       fallbackUsed: Boolean(translateResponse.body?.fallback_used),
-      diagnostics: translateResponse.body?.diagnostics || null,
+      diagnostics: translateResponse.body?.diagnostics || null
+    };
+    const classified = translationOutcomes.classifyTranslations({
+      blocks: mergedOcrResults,
+      translations,
+      reportedOutcomes: translateResponse.body?.outcomes,
+      sourceLanguage: translatedSourceLanguage,
+      targetLanguage
+    });
+    const translationEntries = classified.entries;
+
+    if (classified.failed.length > 0) {
+      console.warn('[VisionTranslate Content] Some blocks came back without a translation and stay untouched', {
+        failedIndices: classified.failed.map((entry) => entry.index),
+        reasons: classified.failed.map((entry) => entry.reason)
+      });
+    }
+
+    if (classified.verdict) {
+      const { status, reason } = classified.verdict;
+      const notice =
+        reason === 'identical-output'
+          ? 'Translation failed: output matched the source text.'
+          : 'Translation failed: provider returned no translated text.';
+
+      if (status === 'skipped') {
+        console.log('[VisionTranslate Content] Nothing to translate: every block was skipped', {
+          ...verdictDetail,
+          reasons: classified.skipped.map((entry) => entry.reason)
+        });
+      } else {
+        console.error(`[VisionTranslate Content] Blocking overlay render (${reason})`, verdictDetail);
+        if (!isPrefetch) {
+          showTranslationFailureNotice(element, notice);
+        }
+      }
+
+      return endWithout(classified.verdict);
+    }
+
+    console.log('[VisionTranslate Content] Final text passed to overlay rendering', {
+      ...verdictDetail,
       textCount: translationEntries.length
     });
 
     const speechText = overlayModule.buildSpeechText(mergedOcrResults, translations);
-    if (bailIfJobStopped('translation-hash-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('translation-hash-cancelled');
 
     const imageFingerprint = await sha256Hex(stripDataUrlPrefix(imageBase64));
-    if (bailIfJobStopped('translation-hash-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('translation-hash-cancelled');
 
     const translationHash = await sha256Hex(`${targetLanguage}::${speechText}`);
-    if (bailIfJobStopped('translation-hash-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('translation-hash-cancelled');
 
     await syncReadAloudTranslationCache(imageFingerprint, translationHash);
-    if (bailIfJobStopped('read-aloud-cache-sync-cancelled') === null) {
-      return null;
-    }
+    throwIfJobStopped('read-aloud-cache-sync-cancelled');
 
     const prepared = {
       imageBase64,
       rawOcrResults,
       mergedOcrResults,
       translations,
+      outcomes: translationEntries.map((entry) => ({ status: entry.status, reason: entry.reason })),
       speechText,
       imageFingerprint,
       translationHash,
@@ -1891,17 +2231,24 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
       }
     );
 
-    if (isCurrentImageTranslationJob(imageState, currentJob)) {
-      imageState.lastJobResult = 'prepared';
-    }
-
     if (isPrefetch && !imageState.clicked) {
       blockOverlayRenderBecauseNoClick(imageState, 'background-preprocess-finished');
     }
 
-    return prepared;
+    return {
+      status: 'prepared',
+      reason: '',
+      prepared,
+      translated: classified.translated.length,
+      skipped: classified.skipped.length,
+      failed: classified.failed.length
+    };
   })()
     .catch((error) => {
+      if (error instanceof JobStoppedError) {
+        return cancelImageTranslationJobResult(imageState, currentJob, error.reason);
+      }
+
       if (isLifecycleCancellationError(error) || !hasLiveExtensionContext()) {
         console.warn('[VisionTranslate] Image translation preparation cancelled:', error?.message || String(error));
         return cancelImageTranslationJobResult(imageState, currentJob, 'translation-preparation-cancelled');
@@ -1931,8 +2278,8 @@ async function prepareImageForTranslation(imageInfo, options = { reason: 'click'
         });
       }
 
-      finalizeImageTranslationJob(imageState, currentJob, 'failed');
-      return null;
+      finalizeImageTranslationJob(imageState, currentJob);
+      return { status: 'failed', reason: 'unexpected-error', message: error?.message || String(error) };
     })
     .finally(() => {
       if (imageState.preparePromise === preparePromise) {
@@ -1950,29 +2297,20 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
 
   if (!imageState.clicked) {
     blockOverlayRenderBecauseNoClick(imageState, 'render-request-without-click');
-    return false;
+    return { status: 'cancelled', reason: 'render-without-click' };
   }
 
   if (!prepared) {
-    return false;
+    return { status: 'failed', reason: 'nothing-prepared' };
   }
 
+  /* A null job is fine here: the helper tolerates it and still reports. */
   if (!isConnectedElement(imageInfo.element)) {
-    if (renderJob) {
-      return cancelImageTranslationJobResult(imageState, renderJob, 'render-target-disconnected');
-    }
-
-    imageState.lastJobResult = 'cancelled';
-    return null;
+    return cancelImageTranslationJobResult(imageState, renderJob, 'render-target-disconnected');
   }
 
   if (!hasLiveExtensionContext()) {
-    if (renderJob) {
-      return cancelImageTranslationJobResult(imageState, renderJob, 'render-context-invalidated');
-    }
-
-    imageState.lastJobResult = 'cancelled';
-    return null;
+    return cancelImageTranslationJobResult(imageState, renderJob, 'render-context-invalidated');
   }
 
   try {
@@ -2005,12 +2343,7 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
     }
 
     if (!isConnectedElement(imageInfo.element)) {
-      if (renderJob) {
-        return cancelImageTranslationJobResult(imageState, renderJob, 'render-target-disconnected');
-      }
-
-      imageState.lastJobResult = 'cancelled';
-      return null;
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-target-disconnected');
     }
 
     const { canvas, wrapper } = createOverlay(imageInfo.element);
@@ -2038,13 +2371,32 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
       }
     });
 
-    overlayModule.renderTranslation(
+    const renderReport = overlayModule.renderTranslation(
       canvas,
       sourceImage,
       prepared.mergedOcrResults,
       prepared.translations,
       currentSettings
     );
+
+    /*
+     * A block whose translation cannot be laid out inside its region at
+     * the minimum font size is left untouched by the renderer (the source
+     * text stays visible). If that happened to every block there is no
+     * overlay worth showing, so report it instead of a blank success.
+     */
+    if (renderReport && renderReport.rendered === 0 && renderReport.unfit > 0) {
+      removeOverlayForElement(imageInfo.element);
+      const message = 'Translation could not be displayed: the translated text does not fit any text region at the minimum font size.';
+      showTranslationFailureNotice(imageInfo.element, message);
+      finalizeImageTranslationJob(imageState, renderJob);
+      return { status: 'failed', reason: 'no-fit', message };
+    }
+
+    if (renderReport?.unfit) {
+      console.warn(`[VisionTranslate] ${renderReport.unfit} text block(s) were left untranslated because the translation does not fit.`);
+    }
+
     ensureReadAloudButton(imageInfo.element);
     clearTranslationFailureNotice(imageInfo.element);
 
@@ -2053,22 +2405,12 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
       blockCount: prepared.mergedOcrResults.length
     });
 
-    if (renderJob) {
-      finalizeImageTranslationJob(imageState, renderJob, 'rendered');
-    } else {
-      imageState.lastJobResult = 'rendered';
-    }
-
-    return true;
+    finalizeImageTranslationJob(imageState, renderJob);
+    return { status: 'rendered', reason: '', unfit: renderReport?.unfit || 0 };
   } catch (error) {
     if (isLifecycleCancellationError(error) || !hasLiveExtensionContext() || !isConnectedElement(imageInfo.element)) {
       console.warn('[VisionTranslate] Image render cancelled:', error?.message || String(error));
-      if (renderJob) {
-        return cancelImageTranslationJobResult(imageState, renderJob, 'render-cancelled');
-      }
-
-      imageState.lastJobResult = 'cancelled';
-      return null;
+      return cancelImageTranslationJobResult(imageState, renderJob, 'render-cancelled');
     }
 
     console.error('[VisionTranslate] Error rendering prepared image:', error);
@@ -2080,18 +2422,27 @@ async function renderPreparedImage(imageInfo, prepared, options = {}) {
       );
     }
 
-    if (renderJob) {
-      finalizeImageTranslationJob(imageState, renderJob, 'failed');
-    } else {
-      imageState.lastJobResult = 'failed';
-    }
+    finalizeImageTranslationJob(imageState, renderJob);
 
-    return false;
+    return { status: 'failed', reason: 'render-failed', message: error?.message || String(error) };
   }
 }
 
-async function translateImageOnClick(imageInfo) {
+/*
+ * Runs the click pipeline for one image and reports how it ended:
+ *   { status: 'rendered' }                 an overlay is showing
+ *   { status: 'skipped' | 'no-text', … }   nothing to translate (neutral)
+ *   { status: 'failed', reason, message }  a real error
+ *   { status: 'cancelled' }                deactivated / superseded / removed
+ */
+async function translateImageOnClick(discoveredImageInfo) {
+  const imageInfo = resolveLiveImageInfo(discoveredImageInfo);
   const imageState = ensureImageState(imageInfo);
+
+  if (!isActive) {
+    return { status: 'cancelled', reason: 'inactive' };
+  }
+
   imageState.clicked = true;
   setImageLifecycleState(imageState, 'clicked');
   clearTranslationFailureNotice(imageInfo.element);
@@ -2101,23 +2452,17 @@ async function translateImageOnClick(imageInfo) {
     existingOverlay.showingTranslation = true;
     setOverlayVisibility(existingOverlay.canvas, true);
     ensureReadAloudButton(imageInfo.element);
-    return true;
+    return { status: 'rendered', reason: 'existing-overlay' };
   }
 
-  const prepared = await prepareImageForTranslation(imageInfo, { reason: 'click' });
-  if (!prepared) {
-    return imageState.lastJobResult === 'cancelled' ? null : false;
+  const prepareOutcome = await prepareImageForTranslation(imageInfo, { reason: 'click' });
+  if (prepareOutcome.status !== 'prepared') {
+    return prepareOutcome;
   }
 
   const renderJob =
     imageState.activeJob || startImageTranslationJob(imageState, 'render-prepared-image');
-  const didRender = await renderPreparedImage(imageInfo, prepared, { job: renderJob });
-
-  if (!didRender) {
-    return imageState.lastJobResult === 'cancelled' ? null : false;
-  }
-
-  return true;
+  return renderPreparedImage(imageInfo, prepareOutcome.prepared, { job: renderJob });
 }
 
 /*
@@ -2132,6 +2477,84 @@ async function translateImageOnClick(imageInfo) {
  * The icon is a small circular button with a translate symbol (文/A) that
  * appears on hover in the top-right corner of the image.
  */
+
+function createIconWrapper(element) {
+  const wrapper = document.createElement('div');
+  wrapper.className = `${CLASS_PREFIX}-icon-wrapper`;
+
+  /*
+   * Detect standalone image pages (image opened in a new tab). Browsers
+   * center these with display:block + margin:auto. If we wrap with
+   * inline-block, the centering is lost. Preserve it by using
+   * display:block + width:fit-content + margin:auto.
+   *
+   * NOTE: getComputedStyle resolves 'auto' margins to pixel values, so we
+   * check document.contentType and the element's inline style.
+   */
+  const isImageDocument = document.contentType &&
+    document.contentType.startsWith('image/');
+  const hasInlineAutoMargin = /margin\s*:\s*auto/i.test(element.style.cssText);
+  const isCentered = isImageDocument || hasInlineAutoMargin;
+
+  wrapper.style.cssText = isCentered
+    ? `position: relative; display: block; width: fit-content; margin: auto;`
+    : `position: relative; display: inline-block;`;
+
+  element.parentNode.insertBefore(wrapper, element);
+  wrapper.appendChild(element);
+  return wrapper;
+}
+
+function resolveControlAnchor(element, parent) {
+  if (element.tagName === 'IMG' || element.tagName === 'CANVAS') {
+    if (parent.classList?.contains(`${CLASS_PREFIX}-icon-wrapper`)) {
+      return parent;
+    }
+
+    const parentPosition = window.getComputedStyle(parent).position;
+    const isPositioned = parentPosition && parentPosition !== 'static';
+    const soleChild = parent.children?.length === 1 && parent.children[0] === element;
+
+    if (isPositioned && soleChild) {
+      return parent;
+    }
+
+    return createIconWrapper(element);
+  }
+
+  /* Background-image elements are containers themselves. */
+  const position = window.getComputedStyle(element).position;
+  if (position === 'static' || position === '') {
+    rememberOriginalInlineStyle(element);
+    element.style.position = 'relative';
+  }
+  return element;
+}
+
+const CONTROL_ICON_STATES = {
+  idle: { label: '文A', background: 'rgba(59, 130, 246, 0.9)', title: 'Translate this image' },
+  working: { label: '⟳', background: 'rgba(59, 130, 246, 0.9)', title: 'Translating…' },
+  rendered: { label: '✓', background: 'rgba(34, 197, 94, 0.9)', title: 'Translated. Click to show or hide.' },
+  skipped: { label: '—', background: 'rgba(100, 116, 139, 0.9)', title: 'Nothing to translate: the text is already in the target language.' },
+  'no-text': { label: '—', background: 'rgba(100, 116, 139, 0.9)', title: 'Nothing to translate: no text was found in this image.' },
+  failed: { label: '✗', background: 'rgba(239, 68, 68, 0.9)', title: 'Translation failed. Click to retry.' }
+};
+
+function setControlIconState(icon, state, detail = '') {
+  if (!icon) return;
+  const next = CONTROL_ICON_STATES[state] || CONTROL_ICON_STATES.idle;
+  icon.innerHTML = next.label;
+  icon.style.background = next.background;
+  icon.style.animation = state === 'working' ? `${CLASS_PREFIX}-spin 1s linear infinite` : 'none';
+  icon.style.opacity = '1';
+  icon.title = detail ? `${next.title} ${detail}` : next.title;
+  icon.dataset.vtState = state;
+  if (state === 'working') {
+    icon.dataset.translating = 'true';
+  } else {
+    delete icon.dataset.translating;
+  }
+}
 
 /**
  * Add translate icons to all qualifying images on the page.
@@ -2150,52 +2573,24 @@ function addTranslateIcons() {
     logImageLifecycle('icon added', imageInfo);
 
     /*
-     * We need the image's parent to be position:relative so we can
-     * absolutely position the icon. Check if it already is.
+     * The control is absolutely positioned inside an anchor. The anchor
+     * must belong to *this* image alone:
+     *
+     *   - a positioned parent whose only element child is the image can
+     *     serve as-is (no layout change);
+     *   - otherwise the image (or canvas) gets its own inline-block
+     *     wrapper. Sharing a positioned parent between several images used
+     *     to put every control at the parent's top-right corner, and a
+     *     <canvas> in a static parent used to receive the control as its
+     *     fallback content, where it is never rendered;
+     *   - a background-image element is itself the container, so it is
+     *     positioned and used directly, as before.
      */
     const parent = element.parentElement;
     if (!parent) continue;
 
-    const parentPosition = window.getComputedStyle(parent).position;
-
-    /* Create a wrapper if the parent isn't already positioned */
-    let iconAnchor;
-    if (parentPosition === 'static' || parentPosition === '') {
-      /* For <img> elements, wrap them in a positioned div */
-      if (element.tagName === 'IMG') {
-        const wrapper = document.createElement('div');
-        wrapper.className = `${CLASS_PREFIX}-icon-wrapper`;
-
-        /*
-         * Detect standalone image pages (image opened in a new tab).
-         * Browsers center these with display:block + margin:auto. If we
-         * wrap with inline-block, the centering is lost. Preserve it by
-         * using display:block + width:fit-content + margin:auto.
-         *
-         * NOTE: getComputedStyle resolves 'auto' margins to pixel values,
-         * so we check document.contentType and the element's inline style.
-         */
-        const isImageDocument = document.contentType &&
-          document.contentType.startsWith('image/');
-        const hasInlineAutoMargin = /margin\s*:\s*auto/i.test(element.style.cssText);
-        const isCentered = isImageDocument || hasInlineAutoMargin;
-
-        wrapper.style.cssText = isCentered
-          ? `position: relative; display: block; width: fit-content; margin: auto;`
-          : `position: relative; display: inline-block;`;
-
-        element.parentNode.insertBefore(wrapper, element);
-        wrapper.appendChild(element);
-        iconAnchor = wrapper;
-      } else {
-        /* For other elements (background, canvas), set position on the element itself */
-        rememberOriginalInlineStyle(element);
-        element.style.position = 'relative';
-        iconAnchor = element;
-      }
-    } else {
-      iconAnchor = parent;
-    }
+    const iconAnchor = resolveControlAnchor(element, parent);
+    if (!iconAnchor) continue;
 
     /* Create the translate icon container */
     const iconContainer = document.createElement("div");
@@ -2289,25 +2684,30 @@ function addTranslateIcons() {
       e.preventDefault();
       e.stopPropagation();
 
-      const imageState = ensureImageState(imageInfo);
-      const overlay = imageOverlays.get(imageInfo.element);
+      if (!isActive) {
+        return;
+      }
+
+      /*
+       * Resolve the element's *current* source: the page may have swapped
+       * src/srcset since this control was created. ensureImageState()
+       * discards any state and job that belonged to the previous source.
+       */
+      const liveInfo = resolveLiveImageInfo(imageInfo);
+      const imageState = ensureImageState(liveInfo);
+      const overlay = imageOverlays.get(liveInfo.element);
 
       if (overlay && overlay.translations && overlay.translations.length > 0) {
         imageState.clicked = true;
         setImageLifecycleState(imageState, 'clicked', { reason: 'reveal-existing-overlay' });
         overlay.showingTranslation = true;
         setOverlayVisibility(overlay.canvas, true);
-        ensureReadAloudButton(imageInfo.element);
-
-        icon.innerHTML = "✓";
-        icon.style.background = "rgba(34, 197, 94, 0.9)";
+        ensureReadAloudButton(liveInfo.element);
+        setControlIconState(icon, 'rendered');
         return;
       }
 
-      icon.dataset.translating = 'true';
-      icon.innerHTML = '⟳';
-      icon.style.opacity = '1';
-      icon.style.animation = `${CLASS_PREFIX}-spin 1s linear infinite`;
+      setControlIconState(icon, 'working');
 
       /*
        * Add the spin animation if not already present. The keyframes are
@@ -2322,32 +2722,20 @@ function addTranslateIcons() {
       }
 
       try {
-        const translationResult = await translateImageOnClick(imageInfo);
-        if (translationResult) {
-          icon.innerHTML = '✓';
-          icon.style.background = 'rgba(34, 197, 94, 0.9)';
-        } else if (translationResult === null) {
-          resetTranslateControl(getTranslateControl(imageInfo.element));
-        } else {
-          icon.innerHTML = '✗';
-          icon.style.background = 'rgba(239, 68, 68, 0.9)';
-        }
-        icon.style.animation = 'none';
+        const outcome = await scheduleImageWork(liveInfo, 'render', PRIORITY_CLICK, () =>
+          translateImageOnClick(liveInfo)
+        );
+        applyOutcomeToControl(getTranslateControl(liveInfo.element) || { icon, element: liveInfo.element }, outcome);
       } catch (err) {
         if (isLifecycleCancellationError(err) || !hasLiveExtensionContext()) {
           console.warn('[VisionTranslate] Single image translation cancelled:', err?.message || String(err));
-          resetTranslateControl(getTranslateControl(imageInfo.element));
+          resetTranslateControl(getTranslateControl(liveInfo.element));
           return;
         }
 
-        /* Show error state */
-        icon.innerHTML = '✗';
-        icon.style.background = 'rgba(239, 68, 68, 0.9)';
-        icon.style.animation = 'none';
+        setControlIconState(icon, 'failed');
         console.error('[VisionTranslate] Single image translation failed:', err);
       }
-
-      delete icon.dataset.translating;
     });
 
     iconAnchor.appendChild(iconContainer);
@@ -2365,6 +2753,39 @@ function addTranslateIcons() {
   }
 }
 
+/* Reflects a finished job on its control. */
+function applyOutcomeToControl(control, outcome) {
+  const icon = control?.icon;
+  if (!icon) return;
+
+  const status = outcome?.status || 'failed';
+  if (status === 'cancelled' || outcome === null || outcome === undefined) {
+    /*
+     * A superseded job must not wipe the result of the job that replaced
+     * it. Swapping an image's src cancels the in-flight job for the old
+     * source, and that cancellation can land after the new source has
+     * already rendered; resetting here would blank a live translation.
+     */
+    if (!imageOverlays.get(control.element)?.translations?.length) {
+      resetTranslateControl(getTranslateControl(control.element) || control);
+    }
+    return;
+  }
+
+  if (status === 'rendered') {
+    setControlIconState(icon, 'rendered', outcome.unfit ? `${outcome.unfit} block(s) did not fit.` : '');
+    return;
+  }
+
+  if (status === 'skipped' || status === 'no-text') {
+    clearTranslationFailureNotice(control.element);
+    setControlIconState(icon, status);
+    return;
+  }
+
+  setControlIconState(icon, 'failed', outcome?.message || '');
+}
+
 /**
  * Remove all translate icons from the page.
  */
@@ -2373,6 +2794,10 @@ function removeTranslateIcons() {
     if (iconContainer) iconContainer.remove(); else icon.remove();
   }
   translateIcons.clear();
+
+  for (const img of [...pendingLoadListeners.keys()]) {
+    unwatchImageLoad(img);
+  }
 
   /* Remove data attributes */
   document.querySelectorAll(`[data-vt-icon-added]`).forEach(el => {
@@ -2390,6 +2815,17 @@ function removeTranslateIcons() {
  */
 async function processAllImages(options = { mode: 'render' }) {
   const mode = options.mode || 'render';
+
+  if (!isActive) {
+    return;
+  }
+
+  /*
+   * The batch belongs to the activation it started under. Deactivating
+   * bumps the generation and the scheduler drops every queued entry, so
+   * no image dequeues after the user turned the extension off.
+   */
+  const generation = activationGeneration;
   const images = scanForImages();
 
   if (images.length === 0) {
@@ -2398,75 +2834,65 @@ async function processAllImages(options = { mode: 'render' }) {
   }
 
   const shouldReportProgress = mode === 'render';
-
-  if (shouldReportProgress) {
+  const reportProgress = (completed) => {
+    if (!shouldReportProgress || generation !== activationGeneration) {
+      return;
+    }
     void safeSendMessage({
       action: 'UPDATE_PROGRESS',
-      payload: { total: images.length, completed: 0 }
+      payload: { total: images.length, completed }
     }).catch((error) => {
       if (!isExtensionContextInvalidated(error)) {
         console.warn('[VisionTranslate] Progress update failed:', error?.message || String(error));
       }
     });
-  }
+  };
+
+  reportProgress(0);
 
   /*
-   * Process images with concurrency control. We use a simple "pool"
-   * pattern: start up to MAX_CONCURRENT_IMAGES tasks, and as each
-   * finishes, start the next one.
-   *
-   * This is like a queue: we keep N workers busy at all times until
-   * the queue is empty.
+   * Every image goes through the page-wide scheduler, which enforces the
+   * parallel-image limit across this batch, individual clicks and the
+   * observer-triggered prefetch together, and deduplicates an image that
+   * is already queued or running.
    */
   let completedCount = 0;
-  let nextIndex = 0;
+  const priority = mode === 'prefetch' ? PRIORITY_PREFETCH : PRIORITY_CLICK;
+  const results = await Promise.all(
+    images.map((discovered) => {
+      /* Key the work on the source the element carries right now. */
+      const liveInfo = resolveLiveImageInfo(discovered);
+      return scheduleImageWork(liveInfo, mode, priority, async () => {
+        if (generation !== activationGeneration || !isActive) {
+          return { status: 'cancelled', reason: 'deactivated' };
+        }
+        const outcome =
+          mode === 'prefetch'
+            ? await prepareImageForTranslation(liveInfo, { reason: 'prefetch' })
+            : await translateImageOnClick(liveInfo);
+        if (mode !== 'prefetch') {
+          applyOutcomeToControl(getTranslateControl(liveInfo.element), outcome);
+        }
+        completedCount++;
+        reportProgress(completedCount);
+        return outcome;
+      }).catch((error) => {
+        if (!isLifecycleCancellationError(error)) {
+          console.error('[VisionTranslate] Image job failed:', error);
+        }
+        return null;
+      });
+    })
+  );
 
-  async function processNext() {
-    while (nextIndex < images.length) {
-      const currentIndex = nextIndex;
-      nextIndex++;
-
-      const imageInfo = images[currentIndex];
-
-      if (mode === 'prefetch') {
-        await prepareImageForTranslation(imageInfo, { reason: 'prefetch' });
-      } else {
-        await translateImageOnClick(imageInfo);
-      }
-
-      completedCount++;
-
-      if (shouldReportProgress) {
-        void safeSendMessage({
-          action: 'UPDATE_PROGRESS',
-          payload: { total: images.length, completed: completedCount }
-        }).catch((error) => {
-          if (!isExtensionContextInvalidated(error)) {
-            console.warn('[VisionTranslate] Progress update failed:', error?.message || String(error));
-          }
-        });
-      }
-    }
+  if (generation !== activationGeneration) {
+    console.log('[VisionTranslate] Batch abandoned: the page was deactivated while it ran.');
+    return;
   }
-
-  /*
-   * Start MAX_CONCURRENT_IMAGES "workers" running in parallel.
-   * Each worker calls processNext(), which grabs the next image from
-   * the shared queue (nextIndex) and processes it. When the queue is
-   * empty, the worker returns.
-   *
-   * Promise.all waits for all workers to finish.
-   */
-  const workers = [];
-  const workerCount = Math.min(getMaxConcurrentImages(), images.length);
-  for (let i = 0; i < workerCount; i++) {
-    workers.push(processNext());
-  }
-
-  await Promise.all(workers);
 
   console.log(
-    `[VisionTranslate] Finished ${mode === 'prefetch' ? 'background preprocessing' : 'click-triggered translation'} for ${completedCount} images`
+    `[VisionTranslate] Finished ${mode === 'prefetch' ? 'background preprocessing' : 'click-triggered translation'} for ${completedCount} of ${images.length} images`,
+    { outcomes: results.map((result) => result?.status || 'none') }
   );
 }
 
@@ -2484,38 +2910,103 @@ async function processAllImages(options = { mode: 'render' }) {
  *   3. Whenever a matching change happens, your callback is called with
  *      a list of "mutation records" describing what changed.
  */
+/*
+ * Debounced discovery refresh shared by the MutationObserver and the
+ * image-load listeners. Images whose src/srcset changed since the last
+ * flush are accumulated in a Set (the debounce restarts on every batch, so
+ * a callback-local list would only ever see the final batch), and images
+ * the page removed are released before new controls are added.
+ */
+let discoveryDebounceTimer = null;
+const imagesPendingInvalidation = new Set();
+let removalsPending = false;
+
+function scheduleDiscoveryRefresh(reason = 'mutation') {
+  clearTimeout(discoveryDebounceTimer);
+  discoveryDebounceTimer = setTimeout(() => {
+    discoveryDebounceTimer = null;
+
+    if (!isActive) {
+      imagesPendingInvalidation.clear();
+      removalsPending = false;
+      return;
+    }
+
+    for (const imageElement of imagesPendingInvalidation) {
+      if (isConnectedElement(imageElement)) {
+        invalidateImageState(imageElement, 'img-src-updated');
+      }
+    }
+    imagesPendingInvalidation.clear();
+
+    if (removalsPending) {
+      removalsPending = false;
+      const released = releaseDisconnectedTargets();
+      if (released) {
+        console.log(`[VisionTranslate] Released state for ${released} removed image(s).`);
+      }
+    }
+
+    console.log(`[VisionTranslate] Refreshing image discovery (${reason}).`);
+    addTranslateIcons();
+
+    if (currentSettings.prefetchTranslations) {
+      processAllImages({ mode: 'prefetch' });
+    }
+  }, 500);
+}
+
+function cancelDiscoveryRefresh() {
+  clearTimeout(discoveryDebounceTimer);
+  discoveryDebounceTimer = null;
+  imagesPendingInvalidation.clear();
+  removalsPending = false;
+}
+
 function setupMutationObserver() {
-  /*
-   * Debounce timer. When many mutations happen rapidly (e.g., a
-   * framework re-rendering a large list), we don't want to scan for
-   * images on every single mutation. Instead, we wait for mutations
-   * to stop for 500ms, then scan once.
-   */
-  let debounceTimer = null;
-
-  /*
-   * Images whose src/srcset changed since the last flush. The debounce
-   * restarts the timer on every relevant batch, so the callback that
-   * eventually runs only ever sees the final batch — anything collected
-   * earlier has to be accumulated here or it is silently dropped.
-   */
-  const imagesPendingInvalidation = new Set();
-
   pageObserver = new MutationObserver((mutationsList) => {
     /*
      * Quick check: do any of the mutations involve image-related changes?
-     * If not, skip the debounced scan entirely.
+     * Mutations the extension caused itself (wrapping an image, adding a
+     * control, painting an overlay) are ignored, otherwise every refresh
+     * would schedule the next one forever.
      */
     let hasRelevantChanges = false;
 
     for (const mutation of mutationsList) {
+      if (isInsideExtensionNode(mutation.target) && mutation.type !== 'childList') {
+        continue;
+      }
+
       if (mutation.type === 'childList') {
+        /*
+         * Removals cannot skip extension nodes the way additions do: an
+         * image the extension wrapped is removed by the page *as that
+         * wrapper*, so ignoring our own nodes here misses the removal of
+         * every wrapped image — which is most of them. Releasing state
+         * adds no nodes, so this cannot feed itself.
+         */
+        for (const node of mutation.removedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) {
+            continue;
+          }
+          if (
+            imageStates.has(node) ||
+            node.tagName === 'IMG' ||
+            node.tagName === 'CANVAS' ||
+            node.querySelector?.('img, canvas')
+          ) {
+            removalsPending = true;
+            hasRelevantChanges = true;
+          }
+        }
+
         /*
          * childList mutations mean nodes were added or removed.
          * Check if any added nodes are images or contain images.
          */
         for (const node of mutation.addedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.nodeType === Node.ELEMENT_NODE && !isExtensionNode(node)) {
             if (
               node.tagName === 'IMG' ||
               node.tagName === 'CANVAS' ||
@@ -2550,43 +3041,19 @@ function setupMutationObserver() {
               mutation.target.style?.backgroundImage ||
               /background-image\s*:/i.test(mutation.oldValue || '')
             ) &&
-            !mutation.target.classList?.contains(`${CLASS_PREFIX}-wrapper`) &&
-            !mutation.target.classList?.contains(`${CLASS_PREFIX}-icon-wrapper`) &&
-            !mutation.target.classList?.contains(`${CLASS_PREFIX}-canvas`)
+            !isExtensionNode(mutation.target)
           )
         ) {
           hasRelevantChanges = true;
         }
       }
 
-      if (hasRelevantChanges) break;
+      if (hasRelevantChanges && !removalsPending) break;
     }
 
     if (!hasRelevantChanges) return;
 
-    /*
-     * Debounce: clear any pending timer and set a new one. The scan
-     * will only happen after 500ms of no new relevant mutations.
-     */
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      if (!isActive) {
-        imagesPendingInvalidation.clear();
-        return;
-      }
-
-      for (const imageElement of imagesPendingInvalidation) {
-        invalidateImageState(imageElement, 'img-src-updated');
-      }
-      imagesPendingInvalidation.clear();
-
-      console.log('[VisionTranslate] New or updated images detected. Refreshing discovery only.');
-      addTranslateIcons();
-
-      if (currentSettings.prefetchTranslations) {
-        processAllImages({ mode: 'prefetch' });
-      }
-    }, 500);
+    scheduleDiscoveryRefresh('mutation');
   });
 
   /*
@@ -2618,6 +3085,15 @@ function setupMutationObserver() {
  * restores the original page layout.
  */
 function cleanupAll() {
+  /*
+   * Order matters: first make every running or queued job stale, then
+   * tear the DOM down. A job that wakes up after this finds a new
+   * generation and bails instead of painting into a cleaned page.
+   */
+  activationGeneration += 1;
+  cancelDiscoveryRefresh();
+  dropQueuedImageWork();
+  cancelAllImageJobs('deactivated');
   stopActiveReadAloudPlayback();
 
   /*
@@ -2679,7 +3155,6 @@ function cleanupAll() {
   }
 
   imageOverlays = new WeakMap();
-  imageProcessIds = new WeakMap();
   imageStates = new WeakMap();
 
   /*
@@ -2705,7 +3180,11 @@ async function activate(settings) {
   }
 
   isActive = true;
+  activationGeneration += 1;
   currentSettings = settings || {};
+
+  /* Every path below runs only while active, so these are ready. */
+  await ensureSharedModules();
 
   console.log('[VisionTranslate] Activating', {
     ocrEngine: currentSettings.ocrEngine || 'tesseract',

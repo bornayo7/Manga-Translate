@@ -78,6 +78,9 @@
     {
       "resources": [
         "overlay.js",
+        "shared/image-work-queue.js",
+        "shared/translation-outcomes.js",
+        "shared/text-layout.js",
         "lib/*",
         "ocr/*"
       ],

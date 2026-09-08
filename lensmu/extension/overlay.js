@@ -50,6 +50,12 @@
  * ==========================================================================
  */
 
+import {
+  detectCJK,
+  layoutTextBlock,
+  normalizeTranslationText
+} from './shared/text-layout.js';
+
 /*
  * --------------------------------------------------------------------------
  * Background Color Sampling Algorithm
@@ -762,10 +768,6 @@ function unionBoxes(boxes) {
   };
 }
 
-function detectCJK(text) {
-  return /[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/.test(text);
-}
-
 function shouldInsertSpace(previousText, nextText) {
   if (!previousText || !nextText) return false;
   if (detectCJK(previousText) || detectCJK(nextText)) return false;
@@ -1098,13 +1100,6 @@ export function groupTextBlocks(ocrResults = []) {
   return mergedBlocks;
 }
 
-function normalizeTranslationText(text) {
-  return String(text || '')
-    .replace(/\s*\n+\s*/g, ' ')
-    .replace(/[ \t]+/g, ' ')
-    .trim();
-}
-
 function endsWithSpeechPause(text) {
   return /[.!?;:…。！？]$/.test(String(text || '').trim());
 }
@@ -1134,211 +1129,30 @@ export function buildSpeechText(ocrResults = [], translations = []) {
   return speechText.trim();
 }
 
-function splitOversizedToken(ctx, token, maxWidth) {
-  const pieces = [];
-  let current = '';
-
-  for (const char of Array.from(token)) {
-    const next = current + char;
-    if (!current || ctx.measureText(next).width <= maxWidth) {
-      current = next;
-      continue;
-    }
-
-    pieces.push(current);
-    current = char;
-  }
-
-  if (current) {
-    pieces.push(current);
-  }
-
-  return pieces;
-}
-
-function tokenizeForWrap(text) {
-  const normalized = normalizeTranslationText(text);
-
-  if (!normalized) {
-    return { tokens: [], separator: ' ' };
-  }
-
-  const words = normalized.split(/\s+/).filter(Boolean);
-  if (words.length > 1) {
-    return { tokens: words, separator: ' ' };
-  }
-
-  if (detectCJK(normalized) || normalized.length > 20) {
-    return { tokens: Array.from(normalized), separator: '' };
-  }
-
-  return { tokens: [normalized], separator: '' };
-}
-
-function wrapText(ctx, text, maxWidth) {
-  const { tokens, separator } = tokenizeForWrap(text);
-
-  if (!tokens.length) {
-    return [''];
-  }
-
-  const lines = [];
-  let currentLine = '';
-
-  for (const token of tokens) {
-    const candidate = currentLine ? `${currentLine}${separator}${token}` : token;
-
-    if (!currentLine || ctx.measureText(candidate).width <= maxWidth) {
-      currentLine = candidate;
-      continue;
-    }
-
-    if (ctx.measureText(token).width > maxWidth) {
-      const tokenPieces = splitOversizedToken(ctx, token, maxWidth);
-
-      if (currentLine) {
-        lines.push(currentLine);
-        currentLine = '';
-      }
-
-      for (const piece of tokenPieces) {
-        if (ctx.measureText(piece).width <= maxWidth) {
-          if (!currentLine) {
-            currentLine = piece;
-          } else if (ctx.measureText(`${currentLine}${separator}${piece}`).width <= maxWidth) {
-            currentLine = `${currentLine}${separator}${piece}`;
-          } else {
-            lines.push(currentLine);
-            currentLine = piece;
-          }
-        }
-      }
-
-      continue;
-    }
-
-    lines.push(currentLine);
-    currentLine = token;
-  }
-
-  if (currentLine) {
-    lines.push(currentLine);
-  }
-
-  return lines.length ? lines : [''];
-}
-
 /*
  * --------------------------------------------------------------------------
  * Auto-Size Font to Fit Bounding Box
  * --------------------------------------------------------------------------
- * Binary search for the largest font size that makes the translated text
- * fit within the given bounding box dimensions.
- *
- * HOW IT WORKS:
- *   1. Start with a range of possible font sizes (minSize to maxSize).
- *   2. Try the midpoint font size.
- *   3. Measure the text with that font size using ctx.measureText().
- *   4. If it fits, try a larger size. If not, try a smaller size.
- *   5. Repeat until we converge on the best size.
- *
- * For multi-line text, we split into lines that fit the width, then
- * check if all lines fit the height.
- *
- * @param {CanvasRenderingContext2D} ctx — Canvas context for measuring
- * @param {string} text — The text to fit
- * @param {number} maxWidth — Maximum width in pixels
- * @param {number} maxHeight — Maximum height in pixels
- * @param {string} fontFamily — Font family to use
- * @param {boolean} isVertical — Whether to render text vertically
- * @returns {{fontSize: number, lines: string[], lineHeight: number}}
- *          The best font size and layout metrics for the text block.
+ * The wrapping and fitting logic lives in shared/text-layout.js so the
+ * website renderer uses the same algorithm. This adapter measures with the
+ * overlay's canvas context and font. The result carries `fits`: when it
+ * is false no layout inside the region exists even at the minimum font
+ * size, and the caller leaves the region untouched.
  */
 function autoSizeFont(ctx, text, maxWidth, maxHeight, fontFamily, isVertical, minFontSizeOverride) {
-  const minFontSize = Math.max(TEXT_RENDER_TUNING.minFontSize, minFontSizeOverride || TEXT_RENDER_TUNING.minFontSize);
-  const maxFontSize = Math.min(
-    TEXT_RENDER_TUNING.maxFontSize,
-    isVertical ? maxWidth : Math.max(maxWidth, maxHeight)
-  );
-
-  if (maxWidth <= 1 || maxHeight <= 1) {
-    return {
-      fontSize: minFontSize,
-      lines: [normalizeTranslationText(text)],
-      lineHeight: minFontSize * TEXT_RENDER_TUNING.minLineHeight
-    };
-  }
-
-  function tryFontSize(size) {
-    ctx.font = `${size}px ${fontFamily}`;
-
-    if (isVertical) {
-      const normalizedText = normalizeTranslationText(text);
-      const charHeight = size * TEXT_RENDER_TUNING.verticalCharHeightRatio;
-      const charsPerColumn = Math.max(1, Math.floor(maxHeight / charHeight));
-      const columns = [];
-
-      for (let i = 0; i < normalizedText.length; i += charsPerColumn) {
-        columns.push(normalizedText.slice(i, i + charsPerColumn));
-      }
-
-      const columnWidth = size * TEXT_RENDER_TUNING.verticalColumnWidthRatio;
-      const totalWidth = columns.length * columnWidth;
-
-      if (totalWidth > maxWidth) {
-        return null;
-      }
-
-      return {
-        lines: columns,
-        lineHeight: charHeight
-      };
-    }
-
-    const lines = wrapText(ctx, text, maxWidth);
-    const desiredMultiplier = maxHeight / Math.max(1, lines.length * size);
-    const lineHeightMultiplier = clamp(
-      desiredMultiplier,
-      TEXT_RENDER_TUNING.minLineHeight,
-      TEXT_RENDER_TUNING.maxLineHeight
-    );
-    const lineHeight = size * lineHeightMultiplier;
-
-    if (lines.length * lineHeight > maxHeight) {
-      return null;
-    }
-
-    return {
-      lines,
-      lineHeight
-    };
-  }
-
-  let low = minFontSize;
-  let high = Math.max(minFontSize, maxFontSize);
-  let bestLayout = {
-    fontSize: minFontSize,
-    lines: [normalizeTranslationText(text)],
-    lineHeight: minFontSize * TEXT_RENDER_TUNING.minLineHeight
-  };
-
-  while (high - low > 0.5) {
-    const mid = (low + high) / 2;
-    const layout = tryFontSize(mid);
-
-    if (layout) {
-      bestLayout = {
-        fontSize: mid,
-        lines: layout.lines,
-        lineHeight: layout.lineHeight
-      };
-      low = mid;
-    } else {
-      high = mid;
-    }
-  }
-
-  return bestLayout;
+  return layoutTextBlock({
+    measureText: (value, size) => {
+      ctx.font = `${size}px ${fontFamily}`;
+      return ctx.measureText(value).width;
+    },
+    text,
+    maxWidth,
+    maxHeight,
+    minFontSize: Math.max(TEXT_RENDER_TUNING.minFontSize, minFontSizeOverride || TEXT_RENDER_TUNING.minFontSize),
+    maxFontSize: TEXT_RENDER_TUNING.maxFontSize,
+    isVertical,
+    tuning: TEXT_RENDER_TUNING
+  });
 }
 
 /*
@@ -1475,6 +1289,13 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
   ctx.clearRect(0, 0, displayWidth, displayHeight);
 
   /*
+   * What happened to each block: painted, left alone because it had no
+   * translation or was too small, or left alone because no layout fits
+   * (the source text stays visible rather than being erased or overrun).
+   */
+  const report = { rendered: 0, skipped: 0, unfit: 0, unfitIndices: [] };
+
+  /*
    * Process each text block (OCR result + its translation).
    */
   for (let i = 0; i < ocrResults.length; i++) {
@@ -1482,7 +1303,10 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
     const translatedText = normalizeTranslationText(translations[i]);
 
     /* Skip if no translation is available for this block */
-    if (!translatedText) continue;
+    if (!translatedText) {
+      report.skipped += 1;
+      continue;
+    }
 
     /*
      * Scale the bounding box from image coordinates to canvas coordinates.
@@ -1495,7 +1319,10 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
     };
 
     /* Skip boxes that are too small to render text in */
-    if (box.width < 10 || box.height < 8) continue;
+    if (box.width < 10 || box.height < 8) {
+      report.skipped += 1;
+      continue;
+    }
 
     /*
      * STEP 1: Expand the OCR box toward the original speech bubble or
@@ -1525,14 +1352,13 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
      */
     const cornerRadius = Math.min(10, cleanupBox.width * 0.08, cleanupBox.height * 0.08);
 
-    ctx.fillStyle = `rgb(${fillColor.r}, ${fillColor.g}, ${fillColor.b})`;
-    ctx.beginPath();
-    ctx.roundRect(cleanupBox.x, cleanupBox.y, cleanupBox.width, cleanupBox.height, cornerRadius);
-    ctx.fill();
-
     /*
-     * STEP 3: Determine text rendering direction and auto-size the font.
-     * Apply internal padding so text doesn't touch the edges.
+     * STEP 3 (before painting anything): determine text direction and find
+     * a font size at which the translation fits inside the region, width
+     * and height both. If none exists even at the minimum size the region
+     * is left exactly as it was: erasing the source text and then drawing
+     * a translation that runs outside the box, or dropping characters to
+     * make it fit, would both lose information.
      */
     const innerPadding = Math.max(
       TEXT_RENDER_TUNING.innerPaddingPx,
@@ -1541,14 +1367,38 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
     const innerWidth = renderBox.width - innerPadding * 2;
     const innerHeight = renderBox.height - innerPadding * 2;
 
-    if (innerWidth < 5 || innerHeight < 5) continue;
+    if (innerWidth < 5 || innerHeight < 5) {
+      report.skipped += 1;
+      continue;
+    }
 
     const isVertical =
       ocr.orientation === 'vertical' && shouldRenderVertical(translatedText, innerWidth, innerHeight);
     const textAlignment = resolveOverlayAlignment(ocr, settings);
-    const { fontSize, lines, lineHeight } = autoSizeFont(
+    const layout = autoSizeFont(
       ctx, translatedText, innerWidth, innerHeight, fontFamily, isVertical, minimumFontSize
     );
+
+    if (!layout.fits) {
+      report.unfit += 1;
+      report.unfitIndices.push(i);
+      console.warn(
+        `[VisionTranslate Overlay] Block ${ocr.id ?? i} left untouched: the translation does not fit at the minimum font size.`
+      );
+      continue;
+    }
+
+    const { fontSize, lines, lineHeight } = layout;
+
+    /*
+     * STEP 2: Fill only the container interior, leaving the original
+     * bubble or box border visible around the translated text.
+     */
+    ctx.fillStyle = `rgb(${fillColor.r}, ${fillColor.g}, ${fillColor.b})`;
+    ctx.beginPath();
+    ctx.roundRect(cleanupBox.x, cleanupBox.y, cleanupBox.width, cleanupBox.height, cornerRadius);
+    ctx.fill();
+    report.rendered += 1;
 
     /*
      * STEP 4: Determine text color for maximum contrast against the
@@ -1689,5 +1539,10 @@ export function renderTranslation(canvas, originalImage, ocrResults, translation
     }
   }
 
-  console.log(`[VisionTranslate Overlay] Rendered ${ocrResults.length} merged text blocks`);
+  console.log(
+    `[VisionTranslate Overlay] Rendered ${report.rendered} of ${ocrResults.length} merged text blocks` +
+      (report.unfit ? ` (${report.unfit} did not fit)` : '')
+  );
+
+  return report;
 }
