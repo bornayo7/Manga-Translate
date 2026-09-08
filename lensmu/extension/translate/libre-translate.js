@@ -3,53 +3,66 @@
  * MYMEMORY — Free Public Translation
  * =============================================================================
  *
- * WHAT THIS FILE DOES:
- * --------------------
- * Provides free translation without requiring any API key. This is the
- * default translation provider for users who have not configured an LLM.
- * It is only used as fallback for other providers when the user explicitly
- * enables public-provider fallback.
+ * Free translation without an API key. This is the default provider for
+ * users who have not configured an LLM, and the opt-in fallback for other
+ * providers when the user explicitly enables public-provider fallback.
  *
- * MyMemory Translation API
+ * MyMemory Translation API (https://mymemory.translated.net/doc/spec.php)
  *    - URL: https://api.mymemory.translated.net/get
- *    - No API key needed
- *    - Free tier: 5000 chars/day (anonymous), 50000 chars/day (with email)
- *    - Supports most major language pairs
- *    - Uses a combination of machine translation + human translation memory
- *    - Quality: Good for common language pairs, mediocre for rare ones
- *
- * LIMITATIONS:
- * ------------
- *   - Quality is noticeably lower than Google or LLM translation
- *   - Rate limits can be hit during heavy use (lots of images)
- *   - MyMemory has a 500 char limit per segment, so long text gets split
- *   - CJK → English quality varies (Japanese is decent, Chinese is okay,
- *     Korean is weaker)
- *   - No batch API — we have to translate one text at a time (slower)
- *
- * WHEN TO USE:
- * ------------
- * This provider is ideal for:
- *   - Quick casual translation (browsing, not studying)
- *   - Users who don't want to set up API keys
- *   - As an explicitly enabled fallback when the primary provider fails
- *   - Testing the extension before committing to a paid provider
+ *    - No API key needed; 5,000 chars/day anonymous
+ *    - `q` is limited to 500 UTF-8 *bytes* per request, so text is chunked
+ *      by byte size (a 200-character CJK string is already 600 bytes)
+ *    - `langpair` must name the source language; the spec offers no
+ *      auto-detect value, so "auto" is resolved from the text's script or
+ *      stop words and an undecidable text is reported back to the user
+ *    - No batch API: one request per text, paced globally at ~10/s
  * =============================================================================
  */
 
-/**
- * MyMemory has a 500-character limit per request segment.
- * Longer texts are split at sentence boundaries.
- */
-import { chunkText } from '../shared/text-chunking.js';
+import { chunkTextByBytes } from '../shared/text-chunking.js';
 import { fetchWithTimeout } from '../shared/fetch-with-timeout.js';
-import { MYMEMORY_CHAR_LIMIT, assertMyMemoryStatus, ensureTranslatedText } from '../shared/mymemory.js';
+import {
+  MYMEMORY_BYTE_LIMIT,
+  assertMyMemoryStatus,
+  buildMyMemoryLangPair,
+  ensureTranslatedText,
+  exceedsMyMemoryLimit,
+  resolveMyMemorySourceLanguage
+} from '../shared/mymemory.js';
 
 /**
- * Delay between requests to avoid rate limiting (milliseconds).
- * MyMemory allows ~10 requests/second for anonymous users.
+ * Minimum spacing between MyMemory requests, enforced across *every* caller
+ * in this worker. A per-job delay does not bound aggregate traffic: five
+ * images translating in parallel would each pace themselves and together
+ * send 50 requests a second. Anonymous access allows roughly 10/s.
  */
 const REQUEST_DELAY_MS = 100;
+const MYMEMORY_RESPONSE_LIMIT_BYTES = 256 * 1024;
+
+let requestChain = Promise.resolve();
+let lastRequestStartedAt = 0;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Serialises MyMemory requests so no two overlap and consecutive requests are
+// at least REQUEST_DELAY_MS apart, whichever image or job they belong to.
+function paceRequest(task, signal) {
+  const run = requestChain.then(async () => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new DOMException('Request was cancelled.', 'AbortError');
+    }
+    const wait = lastRequestStartedAt + REQUEST_DELAY_MS - Date.now();
+    if (wait > 0) {
+      await sleep(wait);
+    }
+    lastRequestStartedAt = Date.now();
+    return task();
+  });
+  requestChain = run.catch(() => undefined);
+  return run;
+}
 
 /**
  * Translate an array of text strings using MyMemory.
@@ -57,166 +70,118 @@ const REQUEST_DELAY_MS = 100;
  * @param {string[]} texts      — Array of strings to translate
  * @param {string}   sourceLang — Source language code ("auto", "ja", etc.)
  * @param {string}   targetLang — Target language code ("en", "es", etc.)
+ * @param {Object}   [options]  — { signal?: AbortSignal }
  * @returns {Promise<Object>}   — { translations: string[], sourceLang, targetLang, provider }
  */
-export async function translateWithMyMemory(texts, sourceLang, targetLang) {
+export async function translateWithMyMemory(texts, sourceLang, targetLang, options = {}) {
+  const signal = options.signal || undefined;
   try {
-    const translations = await translateEachText(texts, sourceLang, targetLang);
+    const translations = [];
+    const unresolvedBlocks = [];
+    let resolvedSourceLang = sourceLang;
+
+    for (let index = 0; index < texts.length; index++) {
+      const text = texts[index];
+      let source;
+      try {
+        source = resolveMyMemorySourceLanguage(sourceLang, text);
+      } catch (resolveError) {
+        /*
+         * One block whose language cannot be told (a kanji-only sign, a
+         * two-letter Latin fragment) must not sink the rest of the page:
+         * it comes back empty, which translate-manager reports as a failed
+         * block, and only a page with no decidable block at all fails whole.
+         */
+        unresolvedBlocks.push({ index, error: resolveError });
+        translations.push('');
+        continue;
+      }
+
+      resolvedSourceLang = source.detected && texts.length === 1 ? source.language : resolvedSourceLang;
+      translations.push(
+        exceedsMyMemoryLimit(text)
+          ? await translateLongText(text, source.language, targetLang, signal)
+          : await myMemorySingleRequest(text, source.language, targetLang, signal)
+      );
+    }
+
+    if (unresolvedBlocks.length === texts.length) {
+      throw unresolvedBlocks[0].error;
+    }
+
+    if (unresolvedBlocks.length > 0) {
+      console.warn('[VisionTranslate Translation] MyMemory skipped blocks with an undecidable source language', {
+        indices: unresolvedBlocks.map((entry) => entry.index),
+        reason: unresolvedBlocks[0].error.message
+      });
+    }
+
     return {
       translations,
-      sourceLang,
+      sourceLang: resolvedSourceLang,
       targetLang,
-      provider: 'mymemory'
+      provider: 'mymemory',
+      unresolvedIndices: unresolvedBlocks.map((entry) => entry.index)
     };
   } catch (myMemoryError) {
+    if (signal?.aborted || myMemoryError?.name === 'AbortError') {
+      throw myMemoryError;
+    }
     throw new Error(`MyMemory translation failed: ${myMemoryError.message}`);
   }
 }
 
 /**
- * =============================================================================
- * MyMemory Translation
- * =============================================================================
- *
- * API docs: https://mymemory.translated.net/doc/spec.php
- *
- * The API is simple — it's a GET request with query parameters:
- *   ?q=text to translate
- *   &langpair=ja|en         (source|target)
- *   &de=email@example.com   (optional, raises daily limit to 50K chars)
- *
- * Response:
- *   {
- *     "responseData": {
- *       "translatedText": "Hello",
- *       "match": 0.95         // confidence (0–1)
- *     },
- *     "responseStatus": 200
- *   }
+ * Make a single MyMemory translation request for one segment that is
+ * already within MYMEMORY_BYTE_LIMIT.
  */
-
-/**
- * Translate texts using the MyMemory API.
- *
- * Since MyMemory doesn't support batch translation, we translate each
- * text individually. We add a small delay between requests to be polite
- * to the free service.
- *
- * @param {string[]} texts      — Texts to translate
- * @param {string}   sourceLang — Source language code
- * @param {string}   targetLang — Target language code
- * @returns {Promise<string[]>} — Translated texts
- */
-async function translateEachText(texts, sourceLang, targetLang) {
-  const translations = [];
-
-  for (let i = 0; i < texts.length; i++) {
-    const text = texts[i];
-
-    /*
-     * MyMemory has a 500-char limit per request. For longer texts,
-     * we split at sentence boundaries and translate each chunk.
-     */
-    let translated;
-    if (text.length > MYMEMORY_CHAR_LIMIT) {
-      translated = await translateLongText(text, sourceLang, targetLang);
-    } else {
-      translated = await myMemorySingleRequest(text, sourceLang, targetLang);
-    }
-
-    translations.push(translated);
-
-    /*
-     * Add a small delay between requests to avoid rate limiting.
-     * We skip the delay after the last request (no point waiting).
-     */
-    if (i < texts.length - 1) {
-      await sleep(REQUEST_DELAY_MS);
-    }
-  }
-
-  return translations;
-}
-
-/**
- * Make a single MyMemory translation request.
- *
- * @param {string} text       — Text to translate (max 500 chars)
- * @param {string} sourceLang — Source language code
- * @param {string} targetLang — Target language code
- * @returns {Promise<string>} — Translated text
- */
-async function myMemorySingleRequest(text, sourceLang, targetLang) {
-  /*
-   * MyMemory expects the language pair in "source|target" format.
-   * When the extension is set to auto-detect, use MyMemory's documented
-   * "autodetect" source value instead of forcing a specific language.
-   */
-  const source = (sourceLang && sourceLang !== 'auto') ? sourceLang : 'autodetect';
-  const langPair = `${source}|${targetLang}`;
-
+async function myMemorySingleRequest(text, sourceLanguage, targetLang, signal) {
   const params = new URLSearchParams({
     q: text,
-    langpair: langPair
+    langpair: buildMyMemoryLangPair(sourceLanguage, targetLang)
   });
 
   console.log('[VisionTranslate Translation] MyMemory request', {
     provider: 'mymemory',
-    sourceLang: source,
+    sourceLang: sourceLanguage,
     targetLang,
     characterCount: text.length
   });
 
-  const response = await fetchWithTimeout(
-    `https://api.mymemory.translated.net/get?${params.toString()}`
-  );
+  return paceRequest(async () => {
+    const response = await fetchWithTimeout(
+      `https://api.mymemory.translated.net/get?${params.toString()}`,
+      { signal },
+      { maxResponseBytes: MYMEMORY_RESPONSE_LIMIT_BYTES }
+    );
 
-  if (!response.ok) {
-    throw new Error(`MyMemory API error: ${response.status} ${response.statusText}`);
-  }
+    if (!response.ok) {
+      throw new Error(`MyMemory API error: ${response.status} ${response.statusText}`);
+    }
 
-  const data = await response.json();
+    const data = response.json;
 
-  /*
-   * MyMemory returns 200 even for errors and quota exhaustion; the shared
-   * helpers read the body for the real outcome.
-   */
-  assertMyMemoryStatus(data);
+    /*
+     * MyMemory returns 200 even for errors and quota exhaustion; the shared
+     * helpers read the body for the real outcome.
+     */
+    assertMyMemoryStatus(data);
 
-  return ensureTranslatedText(data.responseData?.translatedText, text, 'MyMemory');
+    return ensureTranslatedText(data.responseData?.translatedText, text, 'MyMemory');
+  }, signal);
 }
 
 /**
- * Handle texts longer than MyMemory's 500-char limit by splitting
- * at sentence boundaries.
- *
- * @param {string} text       — Long text to translate
- * @param {string} sourceLang — Source language
- * @param {string} targetLang — Target language
- * @returns {Promise<string>} — Translated text (chunks joined back)
+ * Handle texts larger than MyMemory's 500-byte limit by splitting at
+ * sentence/word/grapheme boundaries and translating each chunk in order.
  */
-async function translateLongText(text, sourceLang, targetLang) {
-  const chunks = chunkText(text, MYMEMORY_CHAR_LIMIT);
-
-  /*
-   * Translate each chunk and join the results.
-   */
+async function translateLongText(text, sourceLanguage, targetLang, signal) {
+  const chunks = chunkTextByBytes(text, MYMEMORY_BYTE_LIMIT);
   const translatedChunks = [];
+
   for (const chunk of chunks) {
-    const translated = await myMemorySingleRequest(chunk, sourceLang, targetLang);
-    translatedChunks.push(translated);
-    await sleep(REQUEST_DELAY_MS);
+    translatedChunks.push(await myMemorySingleRequest(chunk, sourceLanguage, targetLang, signal));
   }
 
   return translatedChunks.join(' ');
-}
-
-/**
- * Simple sleep helper using Promises.
- *
- * @param {number} ms — Milliseconds to sleep
- * @returns {Promise<void>}
- */
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

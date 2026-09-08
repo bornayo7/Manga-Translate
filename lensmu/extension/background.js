@@ -65,16 +65,19 @@ import { translateTexts } from './translate/translate-manager.js';
 import { login as auth0Login, logout as auth0Logout, getAuthState } from './auth/auth0.js';
 import { generateReadAloudAudio, loadElevenLabsVoices, syncReadAloudTranslation } from './tts/elevenlabs.js';
 import { toContentScriptSettings } from './shared/preferences.js';
-import { fetchWithTimeout } from './shared/fetch-with-timeout.js';
-import { readResponseBytesWithLimit } from './shared/response-limits.js';
+import { fetchWithTimeout, isAbortError } from './shared/fetch-with-timeout.js';
 import {
   describeHttpFailure,
-  selectMangaBboxes,
   stripDataUrlPrefix,
   toContentScriptBlocks,
   toErrorMessage,
   trimTrailingSlashes
 } from './shared/text.js';
+import {
+  batchMangaBboxes,
+  mergeMangaResults,
+  parseGoogleVisionResponse
+} from './shared/ocr-responses.js';
 
 /*
  * --------------------------------------------------------------------------
@@ -99,6 +102,82 @@ const tabStates = new Map();
 const REQUEST_TIMEOUT_MS = 30000;
 const IMAGE_FETCH_TIMEOUT_MS = 15000;
 const MAX_FETCH_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_OCR_RESPONSE_BYTES = 8 * 1024 * 1024;
+
+/*
+ * --------------------------------------------------------------------------
+ * In-flight requests owned by content scripts
+ * --------------------------------------------------------------------------
+ * A content script that deactivates, or whose image changed source, sends
+ * CANCEL_REQUESTS with the ids of the OCR/translation requests it no longer
+ * wants. The matching fetches are aborted here. Ids are scoped to the
+ * sending tab so one page can never cancel another page's work.
+ *
+ * Aborting the fetch frees this worker and the network connection; it does
+ * not stop an inference the backend has already started on its side.
+ */
+const inflightRequests = new Map();
+
+function requestKey(tabId, requestId) {
+  return `${tabId ?? 'ext'}:${String(requestId)}`;
+}
+
+function beginTrackedRequest(tabId, requestId) {
+  const controller = new AbortController();
+  if (requestId) {
+    const key = requestKey(tabId, requestId);
+    inflightRequests.get(key)?.abort(new DOMException('Superseded by a newer request.', 'AbortError'));
+    inflightRequests.set(key, controller);
+  }
+  return controller;
+}
+
+function endTrackedRequest(tabId, requestId, controller) {
+  if (!requestId) {
+    return;
+  }
+  const key = requestKey(tabId, requestId);
+  if (inflightRequests.get(key) === controller) {
+    inflightRequests.delete(key);
+  }
+}
+
+function cancelTrackedRequests(tabId, requestIds = []) {
+  let cancelled = 0;
+  for (const requestId of Array.isArray(requestIds) ? requestIds : []) {
+    const key = requestKey(tabId, requestId);
+    const controller = inflightRequests.get(key);
+    if (controller) {
+      controller.abort(new DOMException('Cancelled by the content script.', 'AbortError'));
+      inflightRequests.delete(key);
+      cancelled += 1;
+    }
+  }
+  return cancelled;
+}
+
+function cancelTrackedRequestsForTab(tabId) {
+  const prefix = `${tabId}:`;
+  for (const [key, controller] of inflightRequests) {
+    if (key.startsWith(prefix)) {
+      controller.abort(new DOMException('Tab navigated or closed.', 'AbortError'));
+      inflightRequests.delete(key);
+    }
+  }
+}
+
+function cancelledResponse() {
+  return { ok: false, cancelled: true, status: 0, statusText: 'Cancelled', headers: {}, body: { error: 'Request cancelled.' } };
+}
+
+/*
+ * Only pages the extension itself ships (popup, offscreen document) may
+ * change settings, sign in or out, or use the ElevenLabs key. A content
+ * script runs inside a web page and has sender.tab set.
+ */
+function isExtensionPageSender(sender) {
+  return !sender?.tab && (!sender?.url || sender.url.startsWith(chrome.runtime.getURL('')));
+}
 const PADDLE_LANGUAGE_ALIASES = Object.freeze({
   auto: 'japan',
   ja: 'japan',
@@ -418,16 +497,23 @@ async function sendToContentScript(tabId, message) {
  */
 async function proxyFetch(url, options = {}) {
   try {
-    const response = await fetchWithTimeout(url, options, REQUEST_TIMEOUT_MS);
+    /*
+     * The deadline and the caller's signal cover the body read too, and the
+     * body is capped: a backend that answers 200 and then stalls, or streams
+     * without end, no longer hangs the request forever.
+     */
+    const response = await fetchWithTimeout(url, options, {
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      maxResponseBytes: MAX_OCR_RESPONSE_BYTES
+    });
     const contentType = response.headers.get('content-type') || '';
     const isJson = contentType.includes('application/json');
     /*
-     * JSON.parse can never yield undefined, so undefined is a safe sentinel
-     * for "the server said JSON and then sent something that is not".
+     * The body was already read within the deadline. JSON.parse can never
+     * yield undefined, so undefined is a safe sentinel for "the server said
+     * JSON and then sent something that is not".
      */
-    const body = isJson
-      ? await response.json().catch(() => undefined)
-      : await response.text();
+    const body = isJson ? response.json : response.text;
     const headers = Object.fromEntries(response.headers.entries());
 
     if (response.ok && isJson && body === undefined) {
@@ -474,6 +560,9 @@ async function proxyFetch(url, options = {}) {
       body
     };
   } catch (error) {
+    if (isAbortError(error) || options.signal?.aborted) {
+      return cancelledResponse();
+    }
     return {
       ok: false,
       status: 0,
@@ -561,6 +650,25 @@ const tabStatesReady = restoreTabStates().then(() => {
 });
 
 /*
+ * chrome.storage.local is readable by content scripts by default. Nothing
+ * in content.js reads it (settings arrive through messages with the keys
+ * stripped), but the provider keys live there, so on browsers that support
+ * StorageArea.setAccessLevel() restrict the area to extension pages and
+ * the service worker. Older browsers simply keep the default; the
+ * extension's own contexts are unaffected either way.
+ */
+void (async () => {
+  try {
+    if (typeof chrome.storage?.local?.setAccessLevel === 'function') {
+      await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+      console.log('[VisionTranslate] chrome.storage.local restricted to trusted extension contexts.');
+    }
+  } catch (error) {
+    console.warn('[VisionTranslate] Could not restrict chrome.storage.local access:', toErrorMessage(error));
+  }
+})();
+
+/*
  * --------------------------------------------------------------------------
  * Event: Keyboard Shortcut (Command)
  * --------------------------------------------------------------------------
@@ -588,6 +696,7 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
  */
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await tabStatesReady;
+  cancelTrackedRequestsForTab(tabId);
   if (tabStates.has(tabId)) {
     tabStates.delete(tabId);
     persistTabStates();
@@ -608,6 +717,10 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
  */
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   await tabStatesReady;
+  if (changeInfo.status === 'loading') {
+    cancelTrackedRequestsForTab(tabId);
+  }
+
   if (changeInfo.status === 'loading' && tabStates.has(tabId)) {
     const state = getTabState(tabId);
     state.active = false;
@@ -734,6 +847,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const engine = normalizeOcrEngine(settings.ocrEngine);
         const backendUrl = trimTrailingSlashes(settings.backendUrl) || 'http://localhost:8000';
         const rawImage = stripDataUrlPrefix(payload.imageBase64);
+        const requestController = beginTrackedRequest(tabId, payload.requestId);
+        const signal = requestController.signal;
 
         try {
           let ocrResult;
@@ -750,7 +865,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               body: JSON.stringify({
                 image: rawImage,
                 lang: normalizePaddleLanguage(payload.sourceLang || settings.sourceLanguage)
-              })
+              }),
+              signal
             });
 
             if (!response.ok) {
@@ -771,7 +887,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const detectResponse = await proxyFetch(`${backendUrl}/ocr/paddle`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image: rawImage, lang: 'japan' })
+              body: JSON.stringify({ image: rawImage, lang: 'japan' }),
+              signal
             });
 
             if (!detectResponse.ok) {
@@ -782,55 +899,91 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const paddleDetections = detectResponse.body.detections || [];
 
             /*
-             * Only post boxes the backend will accept: it validates every
-             * box and rejects the whole request (422) on the first bad one,
-             * caps the count at 200 and the summed area at 50 MP. Boxes are
-             * in reading order, so trimming keeps the top of the page.
-             */
-            const mangaBboxes = selectMangaBboxes(paddleDetections);
-            if (mangaBboxes.length < paddleDetections.length) {
-              console.warn(
-                `[VisionTranslate] Sending ${mangaBboxes.length} of ${paddleDetections.length} PaddleOCR boxes to MangaOCR (rest invalid or over the request limits).`
-              );
-            }
-
-            /*
              * MangaOCR recognizes crops; it cannot detect regions on its own.
              * With no boxes from PaddleOCR there is nothing to recognize, so
              * return an empty result instead of inventing a whole-page box.
-             * (A synthetic full-page box is also rejected outright by the
-             * backend, which caps coordinates and total region area.)
              */
-            if (mangaBboxes.length === 0) {
-              sendResponse({ ok: true, body: { blocks: [], source_lang: 'ja' } });
-              break;
-            }
-
-            const mangaResponse = await proxyFetch(`${backendUrl}/ocr/manga`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image: rawImage, bboxes: mangaBboxes })
-            });
-
-            if (!mangaResponse.ok) {
-              sendResponse(mangaResponse);
+            if (paddleDetections.length === 0) {
+              sendResponse({ ok: true, body: { blocks: [], source_lang: 'ja', noText: true } });
               break;
             }
 
             /*
-             * MangaOCR reports neither confidence nor orientation, so assume
-             * a confident, vertical read; fall back to PaddleOCR's own text
-             * (which has both) if MangaOCR recognized nothing.
+             * The backend validates every box and rejects the whole request
+             * (422) on the first bad one, and caps a request at 200 boxes
+             * and 50 MP of total area. Detections are therefore posted in
+             * as many compliant batches as needed (sequentially: the
+             * backend serialises inference anyway) and the answers are
+             * merged back by detection index, so a page with 201 bubbles
+             * loses none of them. Any region MangaOCR fails on keeps
+             * PaddleOCR's own text.
              */
-            const mangaBlocks = toContentScriptBlocks(mangaResponse.body?.detections, {
-              defaultConfidence: 0.9,
-              defaultOrientation: 'vertical'
-            });
-            const fallbackBlocks = toContentScriptBlocks(paddleDetections);
+            const plan = batchMangaBboxes(paddleDetections);
+            if (plan.invalid.length || plan.oversized.length) {
+              console.warn(
+                `[VisionTranslate] ${plan.invalid.length} invalid and ${plan.oversized.length} oversized PaddleOCR boxes keep their PaddleOCR text instead of going to MangaOCR.`
+              );
+            }
+
+            const batchResponses = [];
+            let batchFailure = null;
+            for (const batch of plan.batches) {
+              if (signal.aborted) {
+                break;
+              }
+              const mangaResponse = await proxyFetch(`${backendUrl}/ocr/manga`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: rawImage, bboxes: batch.bboxes }),
+                signal
+              });
+
+              if (mangaResponse.cancelled) {
+                batchFailure = mangaResponse;
+                break;
+              }
+
+              if (!mangaResponse.ok) {
+                batchFailure = batchFailure || mangaResponse;
+                console.warn('[VisionTranslate] MangaOCR batch failed; keeping PaddleOCR text for it:', mangaResponse.body?.error);
+                batchResponses.push(null);
+                continue;
+              }
+
+              batchResponses.push(mangaResponse.body?.detections);
+            }
+
+            if (batchFailure?.cancelled) {
+              sendResponse(batchFailure);
+              break;
+            }
+
+            if (batchFailure && batchResponses.every((entry) => entry === null)) {
+              /*
+               * Every batch failed: MangaOCR is unavailable (501), the
+               * backend is down, ... Report that rather than pretending
+               * the detector's rough text is what the user configured.
+               */
+              sendResponse(batchFailure);
+              break;
+            }
+
+            const merged = mergeMangaResults(paddleDetections, plan.batches, batchResponses);
+            if (merged.fellBack || merged.unexpectedBatches) {
+              console.warn(
+                `[VisionTranslate] MangaOCR recognized ${merged.recognized} regions; ${merged.fellBack} kept PaddleOCR text (${merged.unexpectedBatches} batch responses unusable).`
+              );
+            }
 
             ocrResult = {
-              blocks: mangaBlocks.length > 0 ? mangaBlocks : fallbackBlocks,
-              source_lang: 'ja'
+              blocks: toContentScriptBlocks(merged.blocks),
+              source_lang: 'ja',
+              engineStats: {
+                recognized: merged.recognized,
+                fellBack: merged.fellBack,
+                dropped: merged.dropped,
+                batches: plan.batches.length
+              }
             };
 
           } else if (engine === 'google_vision') {
@@ -853,37 +1006,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     image: { content: rawImage },
                     features: [{ type: 'TEXT_DETECTION' }]
                   }]
-                })
-              }
+                }),
+                signal
+              },
+              { timeoutMs: REQUEST_TIMEOUT_MS, maxResponseBytes: MAX_OCR_RESPONSE_BYTES }
             );
 
             if (!visionResponse.ok) {
-              const err = await visionResponse.json().catch(() => ({}));
-              sendResponse({ ok: false, body: { error: err?.error?.message || visionResponse.statusText } });
+              const err = visionResponse.json || {};
+              sendResponse({ ok: false, body: { error: `Google Cloud Vision error (${visionResponse.status}): ${err?.error?.message || visionResponse.statusText}` } });
               break;
             }
 
-            const visionData = await visionResponse.json();
-            const annotations = visionData.responses?.[0]?.textAnnotations || [];
-
-            /* Skip the first annotation (it's the full page text) */
+            /*
+             * An HTTP 200 can still carry responses[0].error for the image;
+             * the parser turns that into a failure instead of "no text".
+             */
+            const vision = parseGoogleVisionResponse(visionResponse.json);
             ocrResult = {
-              blocks: annotations.slice(1).map(a => {
-                const vs = a.boundingPoly?.vertices || [];
-                const xs = vs.map(v => v.x || 0);
-                const ys = vs.map(v => v.y || 0);
-                return {
-                  text: a.description,
-                  confidence: 0.9,
-                  bbox: {
-                    x: Math.min(...xs),
-                    y: Math.min(...ys),
-                    width: Math.max(...xs) - Math.min(...xs),
-                    height: Math.max(...ys) - Math.min(...ys)
-                  }
-                };
-              }),
-              source_lang: visionData.responses?.[0]?.textAnnotations?.[0]?.locale || 'auto'
+              blocks: vision.blocks,
+              source_lang: vision.sourceLang,
+              noText: vision.noText
             };
 
           } else if (engine === 'custom_ocr') {
@@ -908,7 +1051,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 image: rawImage,
                 imageBase64: rawImage,
                 sourceLang: payload.sourceLang || settings.sourceLanguage || 'auto'
-              })
+              }),
+              signal
             });
 
             if (!customResponse.ok) {
@@ -945,14 +1089,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
 
+          if (signal.aborted) {
+            sendResponse(cancelledResponse());
+            break;
+          }
+
           sendResponse({ ok: true, body: ocrResult });
         } catch (ocrError) {
+          if (isAbortError(ocrError) || signal.aborted) {
+            sendResponse(cancelledResponse());
+            break;
+          }
           console.error('[VisionTranslate] OCR error:', ocrError);
           sendResponse({
             ok: false,
             body: { error: `OCR failed: ${toErrorMessage(ocrError)}` }
           });
+        } finally {
+          endTrackedRequest(tabId, payload.requestId, requestController);
         }
+        break;
+      }
+
+      /*
+       * ---- CANCEL_REQUESTS ----
+       * Sent by a content script that deactivated or invalidated an image
+       * while its OCR/translation requests were still in flight.
+       */
+      case 'CANCEL_REQUESTS': {
+        const cancelled = cancelTrackedRequests(tabId, payload.requestIds);
+        sendResponse({ success: true, cancelled });
         break;
       }
 
@@ -972,6 +1138,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const settings = await getSettings();
         const sourceLang = payload.sourceLang || 'auto';
         const targetLang = payload.targetLang || settings.targetLanguage || 'en';
+        const requestController = beginTrackedRequest(tabId, payload.requestId);
 
         try {
           console.log('[VisionTranslate Background] TRANSLATE_REQUEST received', {
@@ -989,7 +1156,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             payload.texts,
             sourceLang,
             targetLang,
-            settings
+            settings,
+            { signal: requestController.signal }
           );
 
           console.log('[VisionTranslate Background] TRANSLATE_REQUEST result', {
@@ -1002,10 +1170,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             translationCount: result.translations?.length || 0
           });
 
+          if (requestController.signal.aborted) {
+            sendResponse(cancelledResponse());
+            break;
+          }
+
           sendResponse({
             ok: true,
             body: {
               translations: result.translations,
+              outcomes: result.outcomes,
               source_lang: result.sourceLang,
               target_lang: result.targetLang,
               provider: result.provider,
@@ -1015,11 +1189,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           });
         } catch (translateError) {
+          if (isAbortError(translateError) || requestController.signal.aborted) {
+            sendResponse(cancelledResponse());
+            break;
+          }
           console.error('[VisionTranslate] Translation error:', translateError);
           sendResponse({
             ok: false,
             body: { error: translateError.message }
           });
+        } finally {
+          endTrackedRequest(tabId, payload.requestId, requestController);
         }
         break;
       }
@@ -1030,6 +1210,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * This stays separate from OCR and translation and uses the stored API key.
        */
       case 'LOAD_ELEVENLABS_VOICES': {
+        if (!isExtensionPageSender(sender)) {
+          sendResponse({ ok: false, body: { error: 'ElevenLabs voices can only be loaded from the extension popup.' } });
+          break;
+        }
         const settings = await getSettings();
 
         try {
@@ -1055,6 +1239,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * returned, but the network request stays in the background worker.
        */
       case 'TEST_ELEVENLABS_VOICE': {
+        if (!isExtensionPageSender(sender)) {
+          sendResponse({ ok: false, body: { error: 'Voice previews can only be started from the extension popup.' } });
+          break;
+        }
         const settings = await getSettings();
 
         try {
@@ -1193,11 +1381,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             throw new Error('Only HTTP(S) image URLs are supported.');
           }
 
-          const response = await fetchWithTimeout(
-            parsedUrl.href,
-            { method: 'GET', redirect: 'follow', credentials: 'omit' },
-            IMAGE_FETCH_TIMEOUT_MS
-          );
+          const imageController = beginTrackedRequest(tabId, payload.requestId);
+          let response;
+          try {
+            response = await fetchWithTimeout(
+              parsedUrl.href,
+              { method: 'GET', redirect: 'follow', credentials: 'omit', signal: imageController.signal },
+              { timeoutMs: IMAGE_FETCH_TIMEOUT_MS, maxResponseBytes: MAX_FETCH_IMAGE_BYTES, as: 'bytes' }
+            );
+          } finally {
+            endTrackedRequest(tabId, payload.requestId, imageController);
+          }
           if (!response.ok) {
             sendResponse({ ok: false, error: `HTTP ${response.status}` });
             break;
@@ -1211,7 +1405,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             throw new Error('Fetched resource is not an image.');
           }
 
-          const bytes = await readResponseBytesWithLimit(response, MAX_FETCH_IMAGE_BYTES);
+          const bytes = response.bytes;
 
           let binary = '';
           const chunkSize = 8192;
@@ -1225,6 +1419,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           sendResponse({ ok: true, dataUrl });
         } catch (error) {
+          if (isAbortError(error)) {
+            sendResponse({ ok: false, cancelled: true, error: 'Request cancelled.' });
+            break;
+          }
           console.error('[VisionTranslate] FETCH_IMAGE error:', error);
           sendResponse({ ok: false, error: error.message });
         }
@@ -1247,14 +1445,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * We save them and notify all active content scripts.
        */
       case 'SAVE_SETTINGS': {
-        if (sender.tab) {
+        if (!isExtensionPageSender(sender)) {
           sendResponse({
             success: false,
             error: 'Settings can only be changed from an extension page.'
           });
           break;
         }
-        const savedSettings = await saveSettings(payload.settings);
+
+        if (!payload.settings || typeof payload.settings !== 'object' || Array.isArray(payload.settings)) {
+          sendResponse({ success: false, error: 'SAVE_SETTINGS needs a settings object.' });
+          break;
+        }
+
+        /*
+         * The popup sends a patch per change (not a debounced snapshot) so
+         * a change made just before the popup closes still lands. Saves are
+         * serialised inside saveSettings(); a storage failure is reported
+         * as { success: false } rather than as a resolved promise the popup
+         * would mistake for success.
+         */
+        let savedSettings;
+        try {
+          savedSettings = await saveSettings(payload.settings);
+        } catch (error) {
+          sendResponse({ success: false, error: `Could not save settings: ${toErrorMessage(error)}` });
+          break;
+        }
 
         /*
          * Broadcast updated settings to all tabs that have translation
@@ -1270,7 +1487,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         }
 
-        sendResponse({ success: true });
+        sendResponse({ success: true, settings: savedSettings });
         break;
       }
 
@@ -1285,6 +1502,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * Sent by the popup to initiate Auth0 login via chrome.identity.
        */
       case 'AUTH_LOGIN': {
+        if (!isExtensionPageSender(sender)) {
+          sendResponse({ success: false, error: 'Sign-in can only be started from the extension popup.' });
+          break;
+        }
         try {
           const authData = await auth0Login();
           sendResponse({ success: true, user: authData.user });
@@ -1300,6 +1521,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
        * Sent by the popup to clear stored auth tokens.
        */
       case 'AUTH_LOGOUT': {
+        if (!isExtensionPageSender(sender)) {
+          sendResponse({ success: false, error: 'Sign-out can only be started from the extension popup.' });
+          break;
+        }
         try {
           await auth0Logout();
           sendResponse({ success: true });

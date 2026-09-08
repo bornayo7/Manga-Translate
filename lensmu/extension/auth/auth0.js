@@ -152,11 +152,11 @@ export async function login() {
   });
 
   if (!tokenResponse.ok) {
-    const err = await tokenResponse.json().catch(() => ({}));
+    const err = tokenResponse.json || {};
     throw new Error(err.error_description || `Token exchange failed (${tokenResponse.status})`);
   }
 
-  const tokens = await tokenResponse.json();
+  const tokens = tokenResponse.json || {};
 
   /* Decode and validate id_token */
   const claims = decodeJwtPayload(tokens.id_token);

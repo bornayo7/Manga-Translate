@@ -5,313 +5,37 @@
  *
  * This module routes translation requests to the configured provider.
  * It also skips OCR blocks that already appear to be in the target language
- * before any provider call is made.
+ * before any provider call is made, and reports a per-block outcome so the
+ * content script can show "already in the target language" as a neutral
+ * state instead of a provider failure.
  */
 
 import { translateWithLLM } from './llm-translate.js';
 import { translateWithMyMemory } from './libre-translate.js';
 import { isEffectivelyIdenticalTranslation, trimTrailingSlashes } from '../shared/text.js';
-import { resolveProviderModel } from '../shared/llm-models.js';
+import { describeModelMigration, resolveProviderModel } from '../shared/llm-models.js';
+import {
+  TARGET_LANGUAGE_SKIP_THRESHOLD,
+  getTargetLanguageConfidence,
+  hasOnlyNonTranslatableCharacters,
+  normalizeLanguageCode
+} from '../shared/language-detection.js';
 
-const LANGUAGE_ALIASES = {
-  english: 'en',
-  eng: 'en',
-  spanish: 'es',
-  spa: 'es',
-  japanese: 'ja',
-  jpn: 'ja',
-  chinese: 'zh',
-  mandarin: 'zh',
-  korean: 'ko',
-  french: 'fr',
-  german: 'de',
-  portuguese: 'pt',
-  italian: 'it',
-  russian: 'ru',
-  arabic: 'ar',
-  hindi: 'hi',
-  thai: 'th',
-  vietnamese: 'vi',
-  auto: 'auto',
-  autodetect: 'auto',
-  automatic: 'auto'
-};
-
-const SCRIPT_LANGUAGE_RULES = {
-  ja: {
-    pattern: /[\u3040-\u30ff]/g,
-    fallbackPattern: /[\u3400-\u9fff]/g,
-    threshold: 0.08,
-    fallbackThreshold: 0.35
-  },
-  zh: {
-    pattern: /[\u3400-\u9fff]/g,
-    threshold: 0.3
-  },
-  ko: {
-    pattern: /[\uac00-\ud7af]/g,
-    threshold: 0.15
-  },
-  ru: {
-    pattern: /[\u0400-\u04ff]/g,
-    threshold: 0.25
-  },
-  ar: {
-    pattern: /[\u0600-\u06ff]/g,
-    threshold: 0.2
-  },
-  hi: {
-    pattern: /[\u0900-\u097f]/g,
-    threshold: 0.2
-  },
-  th: {
-    pattern: /[\u0e00-\u0e7f]/g,
-    threshold: 0.2
-  }
-};
-
-const LATIN_LANGUAGE_PROFILES = {
-  en: {
-    stopWords: [
-      'a', 'about', 'above', 'after', 'again', 'all', 'also', 'although', 'am',
-      'an', 'and', 'any', 'are', 'as', 'at', 'away', 'back', 'be', 'because',
-      'been', 'before', 'between', 'but', 'by', 'came', 'can', 'clear',
-      'climbed', 'cold', 'could', 'day', 'did', 'down', 'due', 'east',
-      'eastward', 'even', 'few', 'for', 'from', 'gray', 'had', 'has', 'have',
-      'he', 'her', 'here', 'him', 'himself', 'his', 'i', 'if', 'in', 'into',
-      'is', 'it', 'its', 'just', 'lack', 'left', 'line', 'little', 'looking',
-      'made', 'main', 'man', 'many', 'more', 'must', 'no', 'nor', 'not', 'of',
-      'on', 'one', 'or', 'over', 'reaching', 'right', 'seemed', 'seen', 'she',
-      'should', 'sky', 'south', 'steep', 'still', 'sun', 'that', 'the',
-      'their', 'them', 'then', 'there', 'these', 'they', 'things', 'this',
-      'though', 'through', 'to', 'trail', 'up', 'upon', 'us', 'used', 'was',
-      'watch', 'we', 'were', 'when', 'where', 'which', 'who', 'will', 'with',
-      'without', 'would', 'you', 'your'
-    ],
-    penaltyPattern: /[àáâãäåæçèéêëìíîïñòóôõöøùúûüýÿ¿¡]/i
-  },
-  es: {
-    stopWords: [
-      'a', 'al', 'algo', 'aunque', 'cada', 'como', 'con', 'cuando', 'de',
-      'del', 'desde', 'dia', 'el', 'ella', 'ellos', 'en', 'era', 'eran', 'es',
-      'ese', 'esta', 'estaba', 'estaban', 'este', 'esto', 'frio', 'gris',
-      'habia', 'habian', 'hacia', 'hasta', 'hombre', 'la', 'las', 'le', 'lo',
-      'los', 'mas', 'me', 'mi', 'muy', 'ni', 'no', 'para', 'pero', 'por',
-      'que', 'se', 'si', 'sin', 'sol', 'su', 'sus', 'un', 'una', 'unas',
-      'unos', 'y', 'ya'
-    ],
-    markerPattern: /[áéíóúüñ¿¡]/i
-  },
-  fr: {
-    stopWords: [
-      'a', 'ai', 'au', 'aux', 'avec', 'ce', 'ces', 'dans', 'de', 'des', 'du',
-      'elle', 'en', 'est', 'et', 'il', 'je', 'la', 'le', 'les', 'leur', 'mais',
-      'ne', 'nous', 'pas', 'pour', 'que', 'qui', 'se', 'son', 'sur', 'tu',
-      'un', 'une', 'vous'
-    ],
-    markerPattern: /[àâçéèêëîïôûùüÿœ]/i
-  },
-  de: {
-    stopWords: [
-      'aber', 'als', 'am', 'auf', 'aus', 'bei', 'das', 'dem', 'den', 'der',
-      'des', 'die', 'du', 'ein', 'eine', 'einem', 'einen', 'einer', 'er', 'es',
-      'für', 'hat', 'ich', 'im', 'in', 'ist', 'mit', 'nicht', 'sie', 'und',
-      'von', 'war', 'wir', 'zu'
-    ],
-    markerPattern: /[äöüß]/i
-  },
-  pt: {
-    stopWords: [
-      'a', 'ao', 'as', 'com', 'como', 'da', 'das', 'de', 'do', 'dos', 'e',
-      'ela', 'ele', 'em', 'era', 'estava', 'eu', 'foi', 'mais', 'mas', 'na',
-      'não', 'no', 'o', 'os', 'para', 'por', 'que', 'se', 'sem', 'um', 'uma'
-    ],
-    markerPattern: /[áâãàçéêíóôõúü]/i
-  },
-  it: {
-    stopWords: [
-      'a', 'al', 'alla', 'che', 'con', 'da', 'del', 'della', 'di', 'e', 'era',
-      'gli', 'ha', 'ho', 'il', 'in', 'io', 'la', 'le', 'lo', 'ma', 'mi',
-      'non', 'per', 'piu', 'più', 'si', 'sono', 'su', 'un', 'una'
-    ],
-    markerPattern: /[àèéìíîòóùú]/i
-  },
-  vi: {
-    stopWords: [
-      'anh', 'ban', 'bạn', 'cua', 'của', 'da', 'đã', 'de', 'để', 'duoc',
-      'được', 'la', 'là', 'mot', 'một', 'nay', 'này', 'toi', 'tôi', 'trong',
-      'va', 'và', 'voi', 'với'
-    ],
-    markerPattern:
-      /[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]/i
-  }
-};
-
-function normalizeLanguageCode(languageCode) {
-  const normalized = String(languageCode || '')
-    .trim()
-    .toLowerCase()
-    .replace(/_/g, '-')
-    .replace(/^zh-cn$/, 'zh')
-    .replace(/^zh-hans$/, 'zh')
-    .replace(/^zh-tw$/, 'zh')
-    .replace(/^zh-hant$/, 'zh');
-
-  if (!normalized) {
-    return 'auto';
-  }
-
-  if (LANGUAGE_ALIASES[normalized]) {
-    return LANGUAGE_ALIASES[normalized];
-  }
-
-  const baseLanguage = normalized.split('-')[0];
-  return LANGUAGE_ALIASES[baseLanguage] || baseLanguage;
-}
-
-function countRegexMatches(text, pattern) {
-  const matches = String(text || '').match(pattern);
-  return matches ? matches.length : 0;
-}
-
-function getLetterCount(text) {
-  const matches = String(text || '').match(/\p{L}/gu);
-  return matches ? matches.length : 0;
-}
-
-function foldDiacritics(text) {
-  return String(text || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-}
-
-function getLatinWords(text) {
-  return (
-    String(text || '')
-      .normalize('NFKC')
-      .toLowerCase()
-      .match(/[a-zÀ-ÿ]+(?:['’][a-zÀ-ÿ]+)?/g) || []
-  );
-}
-
-function getScriptLanguageConfidence(text, languageCode) {
-  const rules = SCRIPT_LANGUAGE_RULES[languageCode];
-  if (!rules) {
-    return 0;
-  }
-
-  const totalLetters = Math.max(1, getLetterCount(text));
-  const primaryRatio = countRegexMatches(text, rules.pattern) / totalLetters;
-
-  if (primaryRatio >= rules.threshold) {
-    return Math.min(1, primaryRatio / Math.max(rules.threshold, 0.01));
-  }
-
-  if (rules.fallbackPattern) {
-    const fallbackRatio = countRegexMatches(text, rules.fallbackPattern) / totalLetters;
-    if (fallbackRatio >= rules.fallbackThreshold) {
-      return Math.min(0.75, fallbackRatio / Math.max(rules.fallbackThreshold, 0.01));
-    }
-  }
-
-  return 0;
-}
-
-function scoreLatinLanguage(text, languageCode) {
-  const profile = LATIN_LANGUAGE_PROFILES[languageCode];
-  if (!profile) {
-    return 0;
-  }
-
-  const words = getLatinWords(text);
-  if (!words.length) {
-    return 0;
-  }
-
-  const stopWords = new Set(profile.stopWords.map(foldDiacritics));
-  const normalizedWords = words.map(foldDiacritics);
-  const stopWordHits = normalizedWords.filter((word) => stopWords.has(word)).length;
-  const uniqueStopWordHits = new Set(
-    normalizedWords.filter((word) => stopWords.has(word))
-  ).size;
-  const cappedWordCount = Math.min(words.length, 14);
-  let score = Math.min(0.72, (stopWordHits / cappedWordCount) * 1.55);
-
-  if (stopWordHits >= 4) {
-    score += 0.28;
-  } else if (stopWordHits >= 3) {
-    score += 0.2;
-  } else if (stopWordHits >= 2 && words.length >= 4) {
-    score += 0.12;
-  }
-
-  if (uniqueStopWordHits >= 3) {
-    score += 0.08;
-  }
-
-  if (profile.markerPattern?.test(text)) {
-    score += 0.32;
-  }
-
-  if (profile.penaltyPattern?.test(text)) {
-    score -= 0.25;
-  }
-
-  return Math.max(0, Math.min(1, score));
-}
-
-function getLatinLanguageScores(text) {
-  return Object.fromEntries(
-    Object.keys(LATIN_LANGUAGE_PROFILES).map((languageCode) => [
-      languageCode,
-      scoreLatinLanguage(text, languageCode)
-    ])
-  );
-}
-
-function getTargetLanguageConfidence(text, targetLanguage) {
-  const normalizedTargetLanguage = normalizeLanguageCode(targetLanguage);
-
-  if (SCRIPT_LANGUAGE_RULES[normalizedTargetLanguage]) {
-    return getScriptLanguageConfidence(text, normalizedTargetLanguage);
-  }
-
-  if (LATIN_LANGUAGE_PROFILES[normalizedTargetLanguage]) {
-    const scores = getLatinLanguageScores(text);
-    const targetScore = scores[normalizedTargetLanguage] || 0;
-    const competingScore = Math.max(
-      0,
-      ...Object.entries(scores)
-        .filter(([languageCode]) => languageCode !== normalizedTargetLanguage)
-        .map(([, score]) => score)
-    );
-
-    if (targetScore >= 0.78) {
-      return targetScore;
-    }
-
-    if (targetScore >= 0.58 && targetScore >= competingScore + 0.12) {
-      return targetScore;
-    }
-  }
-
-  return 0;
-}
-
-function hasOnlyNonTranslatableCharacters(text) {
-  const normalized = String(text || '').normalize('NFKC').trim();
-  if (!normalized) {
-    return true;
-  }
-
-  return getLetterCount(normalized) === 0;
-}
+export { normalizeLanguageCode };
 
 /**
  * Decide whether one OCR block should be translated.
- * Conservative behavior is intentional. It is better to leave target-language
- * text untouched than to overwrite it with a bad duplicate translation.
+ *
+ * Order matters:
+ *   1. Nothing translatable (punctuation, digits) is skipped.
+ *   2. An explicit source language is respected before any heuristic: equal
+ *      to the target → skip; different from the target → translate, even
+ *      when the script could also belong to the target (Chinese → Japanese
+ *      shares Han characters, and the old order misread it as "already
+ *      Japanese").
+ *   3. With source "auto", the block is skipped only when the script or
+ *      stop-word evidence for the target is decisive. Han-only text is
+ *      ambiguous between Chinese and Japanese and is sent to the provider.
  */
 export function shouldTranslateTextBlock(text, targetLanguage = 'en', sourceLanguage = 'auto') {
   const normalizedText = String(text || '')
@@ -329,36 +53,18 @@ export function shouldTranslateTextBlock(text, targetLanguage = 'en', sourceLang
     };
   }
 
-  const targetConfidence = getTargetLanguageConfidence(
-    normalizedText,
-    normalizedTargetLanguage
-  );
+  const evidence = getTargetLanguageConfidence(normalizedText, normalizedTargetLanguage);
+  const targetConfidence = evidence.confidence;
 
-  if (targetConfidence >= 0.58) {
-    return {
-      translate: false,
-      reason: 'already-target-language',
-      targetConfidence
-    };
-  }
+  if (normalizedSourceLanguage && normalizedSourceLanguage !== 'auto') {
+    if (normalizedSourceLanguage === normalizedTargetLanguage) {
+      return {
+        translate: false,
+        reason: 'source-matches-target-language',
+        targetConfidence: Math.max(targetConfidence, 0.9)
+      };
+    }
 
-  if (
-    normalizedSourceLanguage &&
-    normalizedSourceLanguage !== 'auto' &&
-    normalizedSourceLanguage === normalizedTargetLanguage
-  ) {
-    return {
-      translate: false,
-      reason: 'source-matches-target-language',
-      targetConfidence: Math.max(targetConfidence, 0.9)
-    };
-  }
-
-  if (
-    normalizedSourceLanguage &&
-    normalizedSourceLanguage !== 'auto' &&
-    normalizedSourceLanguage !== normalizedTargetLanguage
-  ) {
     return {
       translate: true,
       reason: 'source-language-differs-from-target',
@@ -366,11 +72,23 @@ export function shouldTranslateTextBlock(text, targetLanguage = 'en', sourceLang
     };
   }
 
+  if (!evidence.ambiguous && targetConfidence >= TARGET_LANGUAGE_SKIP_THRESHOLD) {
+    return {
+      translate: false,
+      reason: 'already-target-language',
+      targetConfidence
+    };
+  }
+
   return {
     translate: true,
-    reason: 'needs-translation',
+    reason: evidence.ambiguous ? 'ambiguous-script' : 'needs-translation',
     targetConfidence
   };
+}
+
+function buildOutcomes(count) {
+  return Array.from({ length: count }, () => ({ status: 'translated', reason: '' }));
 }
 
 /**
@@ -380,12 +98,20 @@ export function shouldTranslateTextBlock(text, targetLanguage = 'en', sourceLang
  * @param {string} sourceLang - Source language code.
  * @param {string} targetLang - Target language code.
  * @param {Object} settings - User settings from chrome.storage.
- * @returns {Promise<Object>} Translation result.
+ * @param {Object} [options] - { signal?: AbortSignal } to cancel provider requests.
+ * @returns {Promise<Object>} { translations, outcomes, sourceLang, targetLang, provider, ... }
+ *   outcomes[i].status is one of "translated" | "skipped" | "failed"; a
+ *   skipped block was intentionally not sent (already in the target
+ *   language, or no translatable text); a failed block was requested but
+ *   the provider returned nothing for it.
  */
-export async function translateTexts(texts, sourceLang, targetLang, settings = {}) {
+export async function translateTexts(texts, sourceLang, targetLang, settings = {}, options = {}) {
+  const signal = options.signal || undefined;
+
   if (!texts || texts.length === 0) {
     return {
       translations: [],
+      outcomes: [],
       sourceLang,
       targetLang,
       provider: 'none'
@@ -395,6 +121,7 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
   const indexMap = [];
   const filteredTexts = [];
   const skippedEntries = [];
+  const outcomes = buildOutcomes(texts.length);
 
   for (let i = 0; i < texts.length; i++) {
     const trimmed = (texts[i] || '').trim();
@@ -404,13 +131,18 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       indexMap.push(i);
       filteredTexts.push(trimmed);
     } else {
+      const reason = trimmed.length > 0 ? decision.reason : 'empty-or-non-text';
+      outcomes[i] = { status: 'skipped', reason };
       skippedEntries.push({
         index: i,
-        reason: decision.reason,
+        reason,
         targetConfidence: decision.targetConfidence
       });
     }
   }
+
+  const requestedProvider = settings.translationProvider || 'libre';
+  const provider = requestedProvider === 'google' ? 'libre' : requestedProvider;
 
   if (filteredTexts.length === 0) {
     console.log('[VisionTranslate Translation] Skipped all OCR text blocks before translation', {
@@ -422,15 +154,17 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
 
     return {
       translations: texts.map(() => ''),
+      outcomes,
       sourceLang,
       targetLang,
       provider: 'none',
       diagnostics: {
-        requestedProvider: settings.translationProvider || 'libre',
+        requestedProvider,
         providerUsed: 'none',
         fallbackUsed: false,
         identicalCount: 0,
         identicalIndices: [],
+        failedIndices: [],
         skippedTargetLanguageCount: skippedEntries.length,
         skippedTargetLanguageIndices: skippedEntries.map((entry) => entry.index),
         skippedEntries
@@ -438,10 +172,8 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
     };
   }
 
-  const requestedProvider = settings.translationProvider || 'libre';
-  const provider = requestedProvider === 'google' ? 'libre' : requestedProvider;
-
   let result;
+  let modelMigration = null;
 
   console.log('[VisionTranslate Translation] Dispatching translation request', {
     requestedProvider,
@@ -460,6 +192,16 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
     characterCount: filteredTexts.reduce((total, text) => total + text.length, 0)
   });
 
+  const llmModelFor = (llmProvider) => {
+    modelMigration = describeModelMigration(llmProvider, settings.llmModel);
+    if (modelMigration && modelMigration.reason === 'retired') {
+      console.warn(
+        `[VisionTranslate] The stored ${llmProvider} model "${modelMigration.from}" was retired by the provider; using "${modelMigration.to}".`
+      );
+    }
+    return resolveProviderModel(llmProvider, settings.llmModel);
+  };
+
   try {
     switch (provider) {
       case 'openai': {
@@ -475,7 +217,9 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           targetLang,
           apiKey,
           'openai',
-          resolveProviderModel('openai', settings.llmModel)
+          llmModelFor('openai'),
+          undefined,
+          { signal }
         );
         break;
       }
@@ -493,7 +237,9 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           targetLang,
           apiKey,
           'claude',
-          resolveProviderModel('claude', settings.llmModel)
+          llmModelFor('claude'),
+          undefined,
+          { signal }
         );
         break;
       }
@@ -511,7 +257,9 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           targetLang,
           apiKey,
           'gemini',
-          resolveProviderModel('gemini', settings.llmModel)
+          llmModelFor('gemini'),
+          undefined,
+          { signal }
         );
         break;
       }
@@ -523,6 +271,8 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
             'Custom API requires a base URL. Please add your API base URL in the extension settings.'
           );
         }
+        // Local servers (Ollama, LM Studio, vLLM) legitimately run without a
+        // key; the empty string is passed through and no header is sent.
         const modelName = settings.customModelName || 'default';
         result = await translateWithLLM(
           filteredTexts,
@@ -531,7 +281,8 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
           settings.customApiKey || '',
           'custom',
           modelName,
-          baseUrl
+          baseUrl,
+          { signal }
         );
         break;
       }
@@ -541,18 +292,24 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
         if (requestedProvider === 'google') {
           console.warn('[VisionTranslate] Google Cloud Translation has been removed. Using MyMemory.');
         }
-        result = await translateWithMyMemory(filteredTexts, sourceLang, targetLang);
+        result = await translateWithMyMemory(filteredTexts, sourceLang, targetLang, { signal });
         break;
       }
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // A cancelled request is not a provider failure; never fall back for it.
+    if (signal?.aborted || error?.name === 'AbortError') {
+      throw error;
+    }
+
     console.error(`[VisionTranslate] Translation failed with provider "${provider}":`, error);
 
     if (provider !== 'libre' && settings.allowThirdPartyFallback === true) {
       console.warn('[VisionTranslate] User-enabled third-party fallback is being used.');
       try {
-        result = await translateWithMyMemory(filteredTexts, sourceLang, targetLang);
+        result = await translateWithMyMemory(filteredTexts, sourceLang, targetLang, { signal });
         result.fallback = true;
         result.originalError = errorMessage;
       } catch (fallbackError) {
@@ -601,14 +358,28 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
     });
   }
 
-  const translatedItems = Array.isArray(result.translations) ? result.translations : [];
   const fullTranslations = new Array(texts.length).fill('');
+  const failedIndices = [];
   for (let i = 0; i < indexMap.length; i++) {
-    fullTranslations[indexMap[i]] = translatedItems[i] || '';
+    const translation = String(result.translations[i] || '').trim();
+    fullTranslations[indexMap[i]] = translation;
+    if (!translation) {
+      // Requested, present in the provider's answer, but empty: this block
+      // failed. It is not "skipped" — the user asked for it.
+      outcomes[indexMap[i]] = { status: 'failed', reason: 'empty-provider-output' };
+      failedIndices.push(indexMap[i]);
+    }
+  }
+
+  if (failedIndices.length === indexMap.length) {
+    throw new Error(
+      `${result.provider || provider} returned no translated text for any of the ${indexMap.length} requested blocks.`
+    );
   }
 
   return {
     translations: fullTranslations,
+    outcomes,
     sourceLang: result.sourceLang || sourceLang,
     targetLang: result.targetLang || targetLang,
     provider: result.provider || provider,
@@ -618,11 +389,14 @@ export async function translateTexts(texts, sourceLang, targetLang, settings = {
       requestedProvider,
       providerUsed: result.provider || provider,
       fallbackUsed: Boolean(result.fallback),
+      modelMigration,
       identicalCount: identicalEntries.length,
       identicalIndices: identicalEntries.map((entry) => entry.originalIndex),
+      failedIndices,
       skippedTargetLanguageCount: skippedEntries.length,
       skippedTargetLanguageIndices: skippedEntries.map((entry) => entry.index),
-      skippedEntries
+      skippedEntries,
+      retryCount: result.retryCount || 0
     }
   };
 }

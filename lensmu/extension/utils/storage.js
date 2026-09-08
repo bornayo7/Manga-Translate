@@ -79,18 +79,29 @@ export async function getSettings() {
   }
 }
 
-// Merges partial settings update into stored settings.
-export async function saveSettings(settings) {
-  try {
+/*
+ * Saves are serialised. Each one is a read-merge-write, and the popup now
+ * sends a small patch per change instead of one debounced snapshot, so two
+ * message handlers can easily overlap; without the chain the second read
+ * would miss the first write and the earlier change would be lost.
+ */
+let saveChain = Promise.resolve();
+
+// Merges partial settings update into stored settings. Resolves to the
+// merged object actually written; rejects if storage refused the write.
+export function saveSettings(settings) {
+  const run = saveChain.then(async () => {
     const current = await getSettings();
     const merged = mergeWithDefaults({ ...current, ...(settings || {}) });
     await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
     console.log('[VisionTranslate] Settings saved:', redactSecretsForLog(merged));
     return merged;
-  } catch (error) {
+  });
+  saveChain = run.catch(() => undefined);
+  return run.catch((error) => {
     console.error('[VisionTranslate] Error saving settings:', error);
     throw error;
-  }
+  });
 }
 
 // Per-domain disable list. Extension is ON by default; disabling a site adds it here.

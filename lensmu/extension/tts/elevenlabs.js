@@ -1,10 +1,32 @@
 import { fetchWithTimeout } from "../shared/fetch-with-timeout.js";
 import { DEFAULT_EXTENSION_SETTINGS, clampNumber } from "../shared/preferences.js";
 
+/*
+ * Persistent audio cache in chrome.storage.local.
+ *
+ *   vt_elevenlabs_audio_cache  { [cacheKey]: { audioDataUrl, contentType, byteLength, createdAt, lastAccessedAt } }
+ *   vt_elevenlabs_audio_index  { [imageFingerprint]: { translationHash, cacheKeys } }
+ *
+ * The index ties cached clips to the image and translation they voice so a
+ * re-translated image drops its stale audio. It only ever holds
+ * fingerprints that actually have cached clips: syncReadAloudTranslation()
+ * never creates a record, and pruning removes records left without keys,
+ * so the index is bounded by the audio entry limit rather than by the
+ * number of images ever translated.
+ *
+ * Concurrency: every read-modify-write of the two keys goes through
+ * mutateCacheState(), one serialised chain that reads fresh storage, applies
+ * a synchronous change, prunes and writes. No network request ever runs
+ * inside it, so a slow provider cannot block invalidation, and a
+ * generation that finishes after its translation was replaced is
+ * discarded instead of resurrecting the old clip.
+ */
 const AUDIO_CACHE_STORAGE_KEY = "vt_elevenlabs_audio_cache";
 const AUDIO_INDEX_STORAGE_KEY = "vt_elevenlabs_audio_index";
 const MAX_CACHE_ENTRIES = 12;
 const MAX_CACHE_BYTES = 5 * 1024 * 1024;
+const MAX_AUDIO_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_TRACKED_TRANSLATIONS = 500;
 
 const DEFAULT_ELEVENLABS_SETTINGS = {
   elevenLabsApiKey: DEFAULT_EXTENSION_SETTINGS.elevenLabsApiKey,
@@ -118,6 +140,35 @@ function inferContentType(contentTypeHeader, outputFormat) {
   return "audio/mpeg";
 }
 
+/* ---- Cache state: one serialised read-modify-write chain ---------------- */
+
+let cacheMutationChain = Promise.resolve();
+
+// Latest translation hash the content script reported per image
+// fingerprint, kept in memory for the lifetime of this worker. A generation
+// that started before the hash changed must not store its clip. Bounded so
+// a long session cannot grow it without limit.
+const latestTranslationHashes = new Map();
+
+function rememberLatestTranslation(imageFingerprint, translationHash) {
+  if (!imageFingerprint || !translationHash) {
+    return;
+  }
+  latestTranslationHashes.delete(imageFingerprint);
+  latestTranslationHashes.set(imageFingerprint, translationHash);
+  while (latestTranslationHashes.size > MAX_TRACKED_TRANSLATIONS) {
+    latestTranslationHashes.delete(latestTranslationHashes.keys().next().value);
+  }
+}
+
+function isTranslationSuperseded(imageFingerprint, translationHash) {
+  if (!imageFingerprint || !translationHash) {
+    return false;
+  }
+  const latest = latestTranslationHashes.get(imageFingerprint);
+  return Boolean(latest) && latest !== translationHash;
+}
+
 async function readCacheState() {
   const result = await chrome.storage.local.get([
     AUDIO_CACHE_STORAGE_KEY,
@@ -135,6 +186,28 @@ async function writeCacheState(cache, index) {
     [AUDIO_CACHE_STORAGE_KEY]: cache,
     [AUDIO_INDEX_STORAGE_KEY]: index,
   });
+}
+
+/*
+ * Applies `mutate(cache, index)` to a fresh read of storage, then prunes
+ * and writes, serialised with every other mutation. `mutate` must be
+ * synchronous and network-free; it may return { skipWrite: true, ... } to
+ * leave storage untouched. Resolves to whatever `mutate` returned.
+ */
+function mutateCacheState(mutate) {
+  const run = cacheMutationChain.then(async () => {
+    const { cache, index } = await readCacheState();
+    const outcome = mutate(cache, index) || {};
+    if (outcome.skipWrite) {
+      return outcome;
+    }
+    pruneCache(cache, index);
+    pruneIndex(cache, index);
+    await writeCacheState(cache, index);
+    return outcome;
+  });
+  cacheMutationChain = run.catch(() => undefined);
+  return run;
 }
 
 function removeCacheKeys(cache, cacheKeys = []) {
@@ -162,8 +235,6 @@ function pruneCache(cache, index) {
     0
   );
 
-  const removedKeys = new Set();
-
   while (
     sortedEntries.length > MAX_CACHE_ENTRIES ||
     totalBytes > MAX_CACHE_BYTES
@@ -171,53 +242,41 @@ function pruneCache(cache, index) {
     const [cacheKey, entry] = sortedEntries.shift();
     totalBytes -= Number(entry.byteLength || 0);
     delete cache[cacheKey];
-    removedKeys.add(cacheKey);
   }
 
-  if (!removedKeys.size) {
-    return;
-  }
+  void index;
+}
 
+// Drops index references to clips that no longer exist and records that
+// reference nothing, so the index never outgrows the audio it describes.
+function pruneIndex(cache, index) {
   for (const imageFingerprint of Object.keys(index)) {
     const indexEntry = index[imageFingerprint];
-    const nextCacheKeys = (indexEntry?.cacheKeys || []).filter(
-      (cacheKey) => !removedKeys.has(cacheKey)
-    );
+    const liveKeys = (indexEntry?.cacheKeys || []).filter((cacheKey) => Boolean(cache[cacheKey]));
+
+    if (!liveKeys.length) {
+      delete index[imageFingerprint];
+      continue;
+    }
 
     index[imageFingerprint] = {
       translationHash: indexEntry?.translationHash || "",
-      cacheKeys: nextCacheKeys,
+      cacheKeys: liveKeys,
     };
   }
 }
 
-async function ensureImageCacheIndex(cache, index, imageFingerprint, translationHash) {
-  if (!imageFingerprint || !translationHash) {
-    return { invalidatedCount: 0 };
-  }
-
+// Invalidates clips recorded for an image whose translation changed. Never
+// creates a record for an image that has no clips.
+function invalidateStaleAudio(cache, index, imageFingerprint, translationHash) {
   const existingEntry = index[imageFingerprint];
-
-  if (!existingEntry) {
-    index[imageFingerprint] = {
-      translationHash,
-      cacheKeys: [],
-    };
-    return { invalidatedCount: 0 };
-  }
-
-  if (existingEntry.translationHash === translationHash) {
-    return { invalidatedCount: 0 };
+  if (!existingEntry || existingEntry.translationHash === translationHash) {
+    return 0;
   }
 
   const invalidatedCount = removeCacheKeys(cache, existingEntry.cacheKeys);
-
-  index[imageFingerprint] = {
-    translationHash,
-    cacheKeys: [],
-  };
-
-  return { invalidatedCount };
+  delete index[imageFingerprint];
+  return invalidatedCount;
 }
 
 function registerCacheKey(index, imageFingerprint, translationHash, cacheKey) {
@@ -225,10 +284,10 @@ function registerCacheKey(index, imageFingerprint, translationHash, cacheKey) {
     return;
   }
 
-  const existingEntry = index[imageFingerprint] || {
-    translationHash,
-    cacheKeys: [],
-  };
+  const existingEntry =
+    index[imageFingerprint] && index[imageFingerprint].translationHash === translationHash
+      ? index[imageFingerprint]
+      : { translationHash, cacheKeys: [] };
 
   const nextCacheKeys = new Set(existingEntry.cacheKeys || []);
   nextCacheKeys.add(cacheKey);
@@ -239,21 +298,15 @@ function registerCacheKey(index, imageFingerprint, translationHash, cacheKey) {
   };
 }
 
-async function parseErrorResponse(response) {
-  const contentType = response.headers.get("content-type") || "";
-
-  if (contentType.includes("application/json")) {
-    const jsonBody = await response.json().catch(() => null);
-    return (
-      jsonBody?.detail?.message ||
-      jsonBody?.detail ||
-      jsonBody?.message ||
-      `HTTP ${response.status}`
-    );
-  }
-
-  const textBody = await response.text().catch(() => "");
-  return textBody || `HTTP ${response.status}`;
+function parseErrorResponse(response) {
+  const jsonBody = response.json;
+  return (
+    jsonBody?.detail?.message ||
+    jsonBody?.detail ||
+    jsonBody?.message ||
+    response.text ||
+    `HTTP ${response.status}`
+  );
 }
 
 function buildCacheDescriptor({
@@ -292,10 +345,10 @@ export async function loadElevenLabsVoices(rawSettings = {}) {
   });
 
   if (!response.ok) {
-    throw new Error(await parseErrorResponse(response));
+    throw new Error(parseErrorResponse(response));
   }
 
-  const responseBody = await response.json();
+  const responseBody = response.json;
 
   return (responseBody?.voices || [])
     .map((voice) => ({
@@ -307,6 +360,12 @@ export async function loadElevenLabsVoices(rawSettings = {}) {
     .sort((leftVoice, rightVoice) => leftVoice.name.localeCompare(rightVoice.name));
 }
 
+/*
+ * Called by the content script after every translation. Records the
+ * current translation for the image (in memory) and drops any cached clip
+ * that voiced an older translation. Writes nothing when the image has no
+ * clips, so translating hundreds of images leaves the index untouched.
+ */
 export async function syncReadAloudTranslation({
   imageFingerprint,
   translationHash,
@@ -315,18 +374,15 @@ export async function syncReadAloudTranslation({
     return { invalidatedCount: 0 };
   }
 
-  const { cache, index } = await readCacheState();
-  const { invalidatedCount } = await ensureImageCacheIndex(
-    cache,
-    index,
-    imageFingerprint,
-    translationHash
-  );
+  rememberLatestTranslation(imageFingerprint, translationHash);
 
-  pruneCache(cache, index);
-  await writeCacheState(cache, index);
-
-  return { invalidatedCount };
+  return mutateCacheState((cache, index) => {
+    if (!index[imageFingerprint]) {
+      return { invalidatedCount: 0, skipWrite: true };
+    }
+    const invalidatedCount = invalidateStaleAudio(cache, index, imageFingerprint, translationHash);
+    return { invalidatedCount, skipWrite: invalidatedCount === 0 };
+  });
 }
 
 export async function generateReadAloudAudio({
@@ -346,46 +402,37 @@ export async function generateReadAloudAudio({
   const settings = normalizeElevenLabsSettings(rawSettings);
   ensureConfigured(settings);
 
+  const normalizedFingerprint = String(imageFingerprint || "").trim();
   const normalizedTranslationHash =
     String(translationHash || "").trim() || (await sha256Hex(normalizedText));
 
   const descriptor = buildCacheDescriptor({
     text: normalizedText,
     language,
-    imageFingerprint,
+    imageFingerprint: normalizedFingerprint,
     translationHash: normalizedTranslationHash,
     settings,
   });
   const cacheKey = await sha256Hex(JSON.stringify(descriptor));
 
-  let cache = {};
-  let index = {};
-
   if (cacheAudio) {
-    const cacheState = await readCacheState();
-    cache = cacheState.cache;
-    index = cacheState.index;
-
-    await ensureImageCacheIndex(
-      cache,
-      index,
-      imageFingerprint,
-      normalizedTranslationHash
-    );
-
-    const cachedEntry = cache[cacheKey];
-
-    if (cachedEntry?.audioDataUrl) {
+    const hit = await mutateCacheState((cache, index) => {
+      invalidateStaleAudio(cache, index, normalizedFingerprint, normalizedTranslationHash);
+      const cachedEntry = cache[cacheKey];
+      if (!cachedEntry?.audioDataUrl) {
+        return { skipWrite: true, entry: null };
+      }
       cachedEntry.lastAccessedAt = Date.now();
-      cache[cacheKey] = cachedEntry;
-      registerCacheKey(index, imageFingerprint, normalizedTranslationHash, cacheKey);
-      await writeCacheState(cache, index);
+      registerCacheKey(index, normalizedFingerprint, normalizedTranslationHash, cacheKey);
+      return { entry: cachedEntry };
+    });
 
+    if (hit.entry) {
       return {
-        audioDataUrl: cachedEntry.audioDataUrl,
+        audioDataUrl: hit.entry.audioDataUrl,
         cacheKey,
         fromCache: true,
-        contentType: cachedEntry.contentType,
+        contentType: hit.entry.contentType,
       };
     }
   }
@@ -411,15 +458,15 @@ export async function generateReadAloudAudio({
           speed: settings.speed,
         },
       }),
-    }
+    },
+    { maxResponseBytes: MAX_AUDIO_RESPONSE_BYTES, as: 'bytes' }
   );
 
   if (!response.ok) {
-    throw new Error(await parseErrorResponse(response));
+    throw new Error(parseErrorResponse(response));
   }
 
-  const audioBuffer = await response.arrayBuffer();
-  const audioBytes = new Uint8Array(audioBuffer);
+  const audioBytes = response.bytes;
   const contentType = inferContentType(
     response.headers.get("content-type"),
     settings.outputFormat
@@ -427,17 +474,30 @@ export async function generateReadAloudAudio({
   const audioDataUrl = `data:${contentType};base64,${base64FromBytes(audioBytes)}`;
 
   if (cacheAudio) {
-    cache[cacheKey] = {
-      audioDataUrl,
-      contentType,
-      byteLength: estimateByteLength(audioDataUrl),
-      createdAt: Date.now(),
-      lastAccessedAt: Date.now(),
-    };
+    const stored = await mutateCacheState((cache, index) => {
+      /*
+       * While the provider was working the content script may have synced
+       * a newer translation for this image. Storing this clip would
+       * resurrect audio for text that is no longer on the page.
+       */
+      if (isTranslationSuperseded(normalizedFingerprint, normalizedTranslationHash)) {
+        return { skipWrite: true, stale: true };
+      }
 
-    registerCacheKey(index, imageFingerprint, normalizedTranslationHash, cacheKey);
-    pruneCache(cache, index);
-    await writeCacheState(cache, index);
+      cache[cacheKey] = {
+        audioDataUrl,
+        contentType,
+        byteLength: estimateByteLength(audioDataUrl),
+        createdAt: Date.now(),
+        lastAccessedAt: Date.now(),
+      };
+      registerCacheKey(index, normalizedFingerprint, normalizedTranslationHash, cacheKey);
+      return { stale: false };
+    });
+
+    if (stored.stale) {
+      console.warn("[VisionTranslate] Discarded read-aloud audio generated for a translation that has since changed.");
+    }
   }
 
   return {
@@ -447,3 +507,12 @@ export async function generateReadAloudAudio({
     contentType,
   };
 }
+
+// Test-only: exposes the storage keys and limits so a suite can inspect the
+// persisted shape without duplicating the constants.
+export const READ_ALOUD_CACHE_INTERNALS = Object.freeze({
+  AUDIO_CACHE_STORAGE_KEY,
+  AUDIO_INDEX_STORAGE_KEY,
+  MAX_CACHE_ENTRIES,
+  MAX_CACHE_BYTES,
+});
