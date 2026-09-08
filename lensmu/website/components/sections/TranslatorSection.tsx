@@ -54,6 +54,7 @@ export function TranslatorSection() {
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [resultBlob, setResultBlob] = useState<Blob | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [resultWarnings, setResultWarnings] = useState<string[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -73,6 +74,7 @@ export function TranslatorSection() {
     setPreviewUrl(URL.createObjectURL(uploadedFile));
     setResultUrl(null);
     setResultBlob(null);
+    setResultWarnings([]);
     setProcessState("idle");
   }, []);
 
@@ -141,6 +143,7 @@ export function TranslatorSection() {
       });
       setResultBlob(result.blob);
       setResultUrl(result.url);
+      setResultWarnings(result.warnings);
       setProcessState("done");
     } catch (err) {
       console.error("[translator] pipeline failed:", err);
@@ -340,6 +343,14 @@ export function TranslatorSection() {
                         className="h-full w-full object-contain p-4"
                       />
                     </Card>
+
+                    {resultWarnings.length > 0 ? (
+                      <ul className="mt-4 space-y-1 rounded-md border border-amber-300/60 bg-amber-50 p-3 text-xs text-amber-900" role="status">
+                        {resultWarnings.map((warning) => (
+                          <li key={warning}>{warning}</li>
+                        ))}
+                      </ul>
+                    ) : null}
 
                     <Button
                       size="lg"

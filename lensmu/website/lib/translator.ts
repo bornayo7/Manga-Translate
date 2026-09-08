@@ -1,14 +1,26 @@
 // Client-side translation pipeline for the website demo.
 // Requires the FastAPI backend at DEFAULT_BACKEND_URL with CORS for localhost:3000.
 // All work happens in the browser; no Next.js API route is needed.
+//
+// The demo shares its contracts with the extension rather than re-deriving
+// them: request sizing and the source-language rule for MyMemory, the
+// MangaOCR batching/merge, the bounded fetch, and the text-layout algorithm
+// all come from extension/shared/*.js.
 
-import { chunkText } from "../../extension/shared/text-chunking.js";
+import { chunkTextByBytes } from "../../extension/shared/text-chunking.js";
 import {
-  MYMEMORY_CHAR_LIMIT,
+  MYMEMORY_BYTE_LIMIT,
   assertMyMemoryStatus,
+  buildMyMemoryLangPair,
   ensureTranslatedText,
+  exceedsMyMemoryLimit,
+  resolveMyMemorySourceLanguage,
 } from "../../extension/shared/mymemory.js";
-import { describeHttpFailure, selectMangaBboxes } from "../../extension/shared/text.js";
+import { describeHttpFailure } from "../../extension/shared/text.js";
+import { batchMangaBboxes, mergeMangaResults } from "../../extension/shared/ocr-responses.js";
+import { fetchWithTimeout } from "../../extension/shared/fetch-with-timeout.js";
+import { layoutTextBlock } from "../../extension/shared/text-layout.js";
+import { classifyTranslations } from "../../extension/shared/translation-outcomes.js";
 
 export type ProcessState =
   | "idle"
@@ -26,6 +38,7 @@ export type OcrBlock = {
   confidence: number;
   bbox: [number, number, number, number]; // x1, y1, x2, y2
   orientation?: "horizontal" | "vertical";
+  source?: "paddleocr" | "mangaocr";
 };
 
 type BackendDetection = {
@@ -55,56 +68,18 @@ export type TranslateResult = {
   translations: string[];
   width: number;
   height: number;
+  /** Blocks left untouched because no layout fits their region. */
+  unfitBlocks: number;
+  /** Human-readable notes about partial outcomes (empty when everything rendered). */
+  warnings: string[];
 };
 
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 const REQUEST_TIMEOUT_MS = 30000;
-
-async function fetchWithTimeout(
-  input: RequestInfo | URL,
-  init: RequestInit = {},
-  timeoutMs = REQUEST_TIMEOUT_MS
-) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
-}
-
-function normalizeForComparison(text: string): string {
-  return String(text ?? "")
-    .normalize("NFKC")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function isEffectivelyIdenticalTranslation(
-  sourceText: string,
-  translatedText: string
-): boolean {
-  return normalizeForComparison(sourceText) === normalizeForComparison(translatedText);
-}
-
-function languagesClearlyDiffer(sourceLang: string, targetLang: string): boolean {
-  const normalizedSource = normalizeForComparison(sourceLang);
-  const normalizedTarget = normalizeForComparison(targetLang);
-
-  if (!normalizedSource || !normalizedTarget || normalizedSource === "auto" || normalizedSource === "autodetect") {
-    return false;
-  }
-
-  return normalizedSource !== normalizedTarget;
-}
+const MAX_OCR_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_MYMEMORY_RESPONSE_BYTES = 256 * 1024;
+const MIN_FONT_SIZE = 8;
+const MAX_FONT_SIZE = 64;
 
 export async function translateImage(
   options: TranslateOptions
@@ -123,7 +98,8 @@ export async function translateImage(
   const image = await loadImageFromFile(file);
 
   onProgress?.("scanning");
-  const blocks = await runOCR(imageBase64, ocrEngine, backendUrl, sourceLang);
+  const ocr = await runOCR(imageBase64, ocrEngine, backendUrl, sourceLang);
+  const blocks = ocr.blocks;
 
   if (blocks.length === 0) {
     throw new Error(
@@ -133,28 +109,36 @@ export async function translateImage(
   }
 
   onProgress?.("translating");
-  // When source is "auto", let MyMemory auto-detect. It accepts "autodetect"
-  // as a langpair source; otherwise use the explicit ISO code.
-  const resolvedSource =
-    sourceLang === "auto" ? "autodetect" : sourceLang;
+  // MyMemory has no auto-detect: "auto" is resolved per block from the
+  // text's script inside translateOne(), and refused with guidance when
+  // that is not decisive. The demo UI always sends an explicit language.
   const translations = await translateTexts(
     blocks.map((b) => b.text),
-    resolvedSource,
+    sourceLang,
     targetLang
   );
 
   onProgress?.("rendering");
-  const blob = await renderTranslatedImage(image, blocks, translations);
-  const url = URL.createObjectURL(blob);
+  const rendered = await renderTranslatedImage(image, blocks, translations);
+  const url = URL.createObjectURL(rendered.blob);
+
+  const warnings = [...ocr.warnings];
+  if (rendered.unfit > 0) {
+    warnings.push(
+      `${rendered.unfit} text region${rendered.unfit === 1 ? "" : "s"} kept the original text because the translation does not fit at the minimum font size.`
+    );
+  }
 
   onProgress?.("done");
   return {
-    blob,
+    blob: rendered.blob,
     url,
     blocks,
     translations,
     width: image.naturalWidth,
     height: image.naturalHeight,
+    unfitBlocks: rendered.unfit,
+    warnings,
   };
 }
 
@@ -192,12 +176,14 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
 
 // -- OCR (FastAPI backend) --
 
+type OcrOutcome = { blocks: OcrBlock[]; warnings: string[] };
+
 async function runOCR(
   imageBase64: string,
   engine: OcrEngine,
   backendUrl: string,
   sourceLang: string
-): Promise<OcrBlock[]> {
+): Promise<OcrOutcome> {
   // Map the website's source language (ISO 639-1, or "auto") to a language
   // code the backend understands. For MangaOCR we always use Japanese
   // regardless; for PaddleOCR we forward the user's choice.
@@ -209,7 +195,7 @@ async function runOCR(
       image: imageBase64,
       lang: paddleLang,
     });
-    return normalizePaddleDetections(data?.detections ?? []);
+    return { blocks: normalizePaddleDetections(data?.detections ?? []), warnings: [] };
   }
 
   if (engine === "mangaocr") {
@@ -220,50 +206,67 @@ async function runOCR(
       lang: "japan",
     });
     const detections = paddleData?.detections ?? [];
-    if (detections.length === 0) return [];
+    if (detections.length === 0) return { blocks: [], warnings: [] };
 
-    // Only post boxes the backend validator accepts: it rejects the whole
-    // request on one bad box and caps the count and total area (the
-    // extension does the same in background.js).
-    const bboxes = selectMangaBboxes(detections);
-    if (bboxes.length === 0) return normalizePaddleDetections(detections);
+    /*
+     * The backend validates every box, rejects the whole request on one bad
+     * box, and caps a request at 200 boxes / 50 MP. Detections are posted in
+     * as many compliant batches as needed and merged back by index, so no
+     * region is dropped; a region MangaOCR could not read keeps PaddleOCR's
+     * text.
+     */
+    const plan = batchMangaBboxes(detections);
+    const batchResponses: Array<BackendDetection[] | null> = [];
+    let firstFailure: Error | null = null;
 
-    const mangaData = await postJSON<BackendOcrResponse>(`${backendUrl}/ocr/manga`, {
-      image: imageBase64,
-      bboxes,
-    });
-    const mangaDetections: Array<{
-      text: string;
-      bbox: number[];
-      confidence?: number;
-    }> = mangaData?.detections ?? [];
-
-    if (mangaDetections.length === 0) {
-      // Fall back to Paddle's own text if MangaOCR returned nothing.
-      return normalizePaddleDetections(detections);
+    for (const batch of plan.batches) {
+      try {
+        const mangaData = await postJSON<BackendOcrResponse>(`${backendUrl}/ocr/manga`, {
+          image: imageBase64,
+          bboxes: batch.bboxes,
+        });
+        batchResponses.push(mangaData?.detections ?? null);
+      } catch (error) {
+        firstFailure = firstFailure ?? (error instanceof Error ? error : new Error(String(error)));
+        batchResponses.push(null);
+      }
     }
 
-    return mangaDetections
-      .map((d) => ({
-        text: String(d.text ?? "").trim(),
-        confidence: Number(d.confidence ?? 0.9),
-        bbox: [d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]] as OcrBlock["bbox"],
-        orientation: "vertical" as const,
-      }))
-      .filter((b) => b.text.length > 0);
+    if (firstFailure && batchResponses.every((entry) => entry === null)) {
+      // MangaOCR unavailable for every batch: say so instead of quietly
+      // showing the detector's rough text as the configured engine.
+      throw firstFailure;
+    }
+
+    const merged = mergeMangaResults(detections, plan.batches, batchResponses);
+    const warnings: string[] = [];
+    if (merged.fellBack > 0) {
+      warnings.push(
+        `MangaOCR did not recognise ${merged.fellBack} region${merged.fellBack === 1 ? "" : "s"}; PaddleOCR's text was used there.`
+      );
+    }
+    if (plan.oversized.length > 0 || plan.invalid.length > 0) {
+      warnings.push(
+        `${plan.oversized.length + plan.invalid.length} region(s) could not be sent to MangaOCR and kept PaddleOCR's text.`
+      );
+    }
+
+    return {
+      blocks: merged.blocks.map((block) => ({
+        text: block.text,
+        confidence: block.confidence,
+        bbox: [block.bbox[0], block.bbox[1], block.bbox[2], block.bbox[3]] as OcrBlock["bbox"],
+        orientation: block.orientation,
+        source: block.source,
+      })),
+      warnings,
+    };
   }
 
   throw new Error(`Unsupported OCR engine: ${engine}`);
 }
 
-function normalizePaddleDetections(
-  detections: Array<{
-    text: string;
-    bbox: number[];
-    confidence?: number;
-    orientation?: string;
-  }>
-): OcrBlock[] {
+function normalizePaddleDetections(detections: BackendDetection[]): OcrBlock[] {
   return detections
     .map((d) => ({
       text: String(d.text ?? "").trim(),
@@ -271,27 +274,32 @@ function normalizePaddleDetections(
       bbox: [d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]] as OcrBlock["bbox"],
       orientation:
         d.orientation === "vertical" ? ("vertical" as const) : ("horizontal" as const),
+      source: "paddleocr" as const,
     }))
     .filter((b) => b.text.length > 0);
 }
 
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    { timeoutMs: REQUEST_TIMEOUT_MS, maxResponseBytes: MAX_OCR_RESPONSE_BYTES }
+  );
   if (!response.ok) {
     const contentType = response.headers.get("content-type") || "";
-    const body: unknown = contentType.includes("application/json")
-      ? await response.json().catch(() => null)
-      : await response.text().catch(() => "");
+    const errorBody: unknown = contentType.includes("application/json")
+      ? response.json ?? null
+      : response.text ?? "";
     throw new Error(
-      `Backend error: ${describeHttpFailure(response.status, response.statusText, body)}. ` +
+      `Backend error: ${describeHttpFailure(response.status, response.statusText, errorBody)}. ` +
         `Make sure the backend is running at ${new URL(url).origin}.`
     );
   }
-  return response.json() as Promise<T>;
+  return response.json as T;
 }
 
 // -- Translation (MyMemory free API) --
@@ -324,26 +332,18 @@ async function translateTexts(
     }
   }
 
-  const translatedEntries = texts
-    .map((text, index) => ({
-      index,
-      sourceText: text,
-      translation: String(out[index] ?? "").trim(),
-      identical: isEffectivelyIdenticalTranslation(text, out[index] ?? ""),
-    }))
-    .filter((entry) => entry.sourceText.trim().length > 0);
+  const { verdict, translated } = classifyTranslations({
+    blocks: texts.map((text) => ({ text })),
+    translations: out,
+    sourceLanguage: sourceLang,
+    targetLanguage: targetLang,
+  });
 
-  const allTranslationsMatchSource =
-    translatedEntries.length > 0 &&
-    translatedEntries.every(
-      (entry) => entry.translation.length > 0 && entry.identical
-    );
-
-  if (languagesClearlyDiffer(sourceLang, targetLang) && allTranslationsMatchSource) {
+  if (verdict?.reason === "identical-output") {
     console.error("[VisionTranslate Website] Blocking render because every translation matches the source text", {
       sourceLang,
       targetLang,
-      translationCount: translatedEntries.length,
+      translationCount: translated.length,
     });
     throw new Error(
       "Translation failed: provider returned text identical to the source for every block."
@@ -358,46 +358,65 @@ async function translateOne(
   sourceLang: string,
   targetLang: string
 ): Promise<string> {
-  // MyMemory has a 500-char limit per request; split long text at sentence
-  // boundaries. Manga bubbles are almost always under 500 chars so this
-  // rarely fires, but include it to avoid silent truncation.
-  if (text.length > MYMEMORY_CHAR_LIMIT) {
-    const chunks = chunkText(text, MYMEMORY_CHAR_LIMIT);
+  // The language is decided once, from the whole block, and every chunk
+  // below inherits it. A single chunk carries far less evidence than the
+  // block it came from, so re-deciding per chunk would refuse text the
+  // extension translates happily.
+  const source = resolveMyMemorySourceLanguage(sourceLang, text);
+
+  // MyMemory limits `q` to 500 UTF-8 bytes (not characters): a 200-character
+  // Japanese bubble is already 600 bytes. Split by bytes at sentence, word,
+  // then grapheme boundaries and translate the pieces in order.
+  if (exceedsMyMemoryLimit(text)) {
+    const chunks = chunkTextByBytes(text, MYMEMORY_BYTE_LIMIT);
     const translated: string[] = [];
     for (const chunk of chunks) {
-      translated.push(await translateOne(chunk, sourceLang, targetLang));
+      translated.push(await translateSegment(chunk, source.language, targetLang));
     }
     return translated.join(" ");
   }
 
+  return translateSegment(text, source.language, targetLang);
+}
+
+/** One MyMemory request for a segment already within the byte limit. */
+async function translateSegment(
+  text: string,
+  sourceLanguage: string,
+  targetLang: string
+): Promise<string> {
   const params = new URLSearchParams({
     q: text,
-    langpair: `${sourceLang}|${targetLang}`,
+    langpair: buildMyMemoryLangPair(sourceLanguage, targetLang),
   });
   console.log("[VisionTranslate Website] MyMemory request", {
     provider: "mymemory",
-    sourceLang,
+    sourceLang: sourceLanguage,
     targetLang,
     characterCount: text.length,
   });
   const response = await fetchWithTimeout(
-    `https://api.mymemory.translated.net/get?${params.toString()}`
+    `https://api.mymemory.translated.net/get?${params.toString()}`,
+    {},
+    { timeoutMs: REQUEST_TIMEOUT_MS, maxResponseBytes: MAX_MYMEMORY_RESPONSE_BYTES }
   );
   if (!response.ok) {
     throw new Error(`MyMemory ${response.status} ${response.statusText}`);
   }
-  const data = await response.json();
+  const data = response.json as { responseData?: { translatedText?: unknown } };
   assertMyMemoryStatus(data);
   return ensureTranslatedText(data?.responseData?.translatedText, text, "MyMemory");
 }
 
 // -- Canvas rendering --
 
+type RenderOutcome = { blob: Blob; rendered: number; unfit: number };
+
 async function renderTranslatedImage(
   image: HTMLImageElement,
   blocks: OcrBlock[],
   translations: string[]
-): Promise<Blob> {
+): Promise<RenderOutcome> {
   const width = image.naturalWidth;
   const height = image.naturalHeight;
   const canvas = document.createElement("canvas");
@@ -410,7 +429,14 @@ async function renderTranslatedImage(
   ctx.drawImage(image, 0, 0, width, height);
 
   const fontFamily =
-    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif';
+    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Noto Sans CJK JP", sans-serif';
+  const measureText = (text: string, fontSize: number) => {
+    ctx.font = `${fontSize}px ${fontFamily}`;
+    return ctx.measureText(text).width;
+  };
+
+  let rendered = 0;
+  let unfit = 0;
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -423,6 +449,32 @@ async function renderTranslatedImage(
     const boxW = Math.max(0, Math.min(x2 - x1, width - boxX));
     const boxH = Math.max(0, Math.min(y2 - y1, height - boxY));
     if (boxW < 10 || boxH < 8) continue;
+
+    const padding = Math.max(4, Math.min(boxW, boxH) * 0.08);
+    const innerW = boxW - padding * 2;
+    const innerH = boxH - padding * 2;
+    if (innerW < 5 || innerH < 5) continue;
+
+    /*
+     * Lay the text out BEFORE erasing anything. Unicode-aware wrapping
+     * (per grapheme for unspaced Japanese/Chinese) and a layout that is
+     * validated in both dimensions; if nothing fits even at the minimum
+     * size the region is left exactly as it was, so the exported PNG never
+     * contains an erased bubble with overflowing or missing text.
+     */
+    const layout = layoutTextBlock({
+      measureText,
+      text: translated,
+      maxWidth: innerW,
+      maxHeight: innerH,
+      minFontSize: MIN_FONT_SIZE,
+      maxFontSize: MAX_FONT_SIZE,
+    });
+
+    if (!layout.fits) {
+      unfit += 1;
+      continue;
+    }
 
     // 1. Sample background color near the edges of the box so we can paint
     //    over the original text in a matching color.
@@ -439,26 +491,14 @@ async function renderTranslatedImage(
     drawRoundedRect(ctx, fillX, fillY, fillW, fillH, radius);
     ctx.fill();
 
-    // 3. Auto-size the font to fit, then draw the translated text centered.
-    const padding = Math.max(4, Math.min(boxW, boxH) * 0.08);
-    const innerW = boxW - padding * 2;
-    const innerH = boxH - padding * 2;
-    if (innerW < 5 || innerH < 5) continue;
-
-    const { fontSize, lines } = autoSizeFont(
-      ctx,
-      translated,
-      innerW,
-      innerH,
-      fontFamily
-    );
+    // 3. Draw the validated layout, centred.
+    const { fontSize, lines, lineHeight } = layout;
     ctx.font = `${fontSize}px ${fontFamily}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
 
-    const lineHeight = fontSize * 1.3;
     const totalTextHeight = lines.length * lineHeight;
-    const startY = boxY + padding + (innerH - totalTextHeight) / 2;
+    const startY = boxY + padding + Math.max(0, (innerH - totalTextHeight) / 2);
     const centerX = boxX + padding + innerW / 2;
 
     const textColor = getContrastColor(bgColor);
@@ -474,14 +514,23 @@ async function renderTranslatedImage(
       ctx.fillStyle = textColor;
       ctx.fillText(lines[j], centerX, y);
     }
+    rendered += 1;
   }
 
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
+  if (rendered === 0 && unfit > 0) {
+    throw new Error(
+      "The translated text does not fit any of the detected regions at the minimum font size, so nothing was drawn. Try a larger image."
+    );
+  }
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((result) => {
+      if (result) resolve(result);
       else reject(new Error("Failed to export canvas"));
     }, "image/png");
   });
+
+  return { blob, rendered, unfit };
 }
 
 function sampleBackgroundColor(
@@ -574,55 +623,4 @@ function drawRoundedRect(
   ctx.lineTo(x, y + radius);
   ctx.quadraticCurveTo(x, y, x + radius, y);
   ctx.closePath();
-}
-
-function autoSizeFont(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number,
-  maxHeight: number,
-  fontFamily: string
-): { fontSize: number; lines: string[] } {
-  const MIN = 8;
-  const MAX = Math.min(maxHeight, 64);
-
-  const tryFit = (size: number): string[] | null => {
-    ctx.font = `${size}px ${fontFamily}`;
-    const lineHeight = size * 1.3;
-    const words = text.split(/\s+/);
-    const lines: string[] = [];
-    let current = "";
-    for (const word of words) {
-      const test = current ? `${current} ${word}` : word;
-      if (ctx.measureText(test).width > maxWidth && current) {
-        lines.push(current);
-        current = word;
-      } else {
-        current = test;
-      }
-    }
-    if (current) lines.push(current);
-    if (lines.length * lineHeight > maxHeight) return null;
-    for (const line of lines) {
-      if (ctx.measureText(line).width > maxWidth) return null;
-    }
-    return lines;
-  };
-
-  let low = MIN;
-  let high = MAX;
-  let bestSize = MIN;
-  let bestLines: string[] = [text];
-  while (high - low > 0.5) {
-    const mid = (low + high) / 2;
-    const lines = tryFit(mid);
-    if (lines) {
-      bestSize = mid;
-      bestLines = lines;
-      low = mid;
-    } else {
-      high = mid;
-    }
-  }
-  return { fontSize: Math.floor(bestSize), lines: bestLines };
 }

@@ -4,6 +4,7 @@ import type { NextRequest } from "next/server";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 import { auth0, getAuth0Domain } from "./auth0";
+import { mapTokenVerificationError } from "./api-auth-errors.js";
 
 export class ApiAuthError extends Error {
   status: number;
@@ -68,10 +69,27 @@ async function authenticateBearerToken(
   token: string,
   requiredScope?: string
 ): Promise<AuthenticatedRequestUser> {
-  const verification = await jwtVerify(token, getJwks(), {
-    issuer: getIssuerBaseUrl(),
-    audience: getApiAudience(),
-  });
+  // Configuration problems (no domain/audience) throw ApiAuthError(503)
+  // from the getters before any token is looked at.
+  const issuer = getIssuerBaseUrl();
+  const audience = getApiAudience();
+  const jwks = getJwks();
+
+  let verification;
+  try {
+    verification = await jwtVerify(token, jwks, { issuer, audience });
+  } catch (error) {
+    /*
+     * A bad token is the caller's problem (401); an unreachable or unusable
+     * JWKS is ours (503). Anything else falls through to the route's
+     * generic 500 handling with the original error intact for the log.
+     */
+    const mapped = mapTokenVerificationError(error);
+    if (mapped) {
+      throw new ApiAuthError(mapped.status, mapped.message);
+    }
+    throw error;
+  }
   const scopes = readScopes(verification.payload);
 
   if (requiredScope && !scopes.includes(requiredScope)) {
