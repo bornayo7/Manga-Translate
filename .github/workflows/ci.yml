@@ -49,9 +49,6 @@ jobs:
     defaults:
       run:
         working-directory: lensmu/extension
-    env:
-      PLAYWRIGHT_PACKAGE: ${{ runner.temp }}/lensmu-browser-tools/node_modules/playwright/index.mjs
-      BROWSER_ARTIFACTS: ${{ runner.temp }}/lensmu-browser-artifacts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -63,7 +60,7 @@ jobs:
       - run: npm run build
       - run: npm install --prefix "$RUNNER_TEMP/lensmu-browser-tools" --no-save --package-lock=false playwright@1.62.1
       - run: node "$RUNNER_TEMP/lensmu-browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
-      - run: node test/browser/acceptance.mjs
+      - run: PLAYWRIGHT_PACKAGE="$RUNNER_TEMP/lensmu-browser-tools/node_modules/playwright/index.mjs" BROWSER_ARTIFACTS="$RUNNER_TEMP/lensmu-browser-artifacts" node test/browser/acceptance.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -20,18 +20,18 @@ test('every provider default is one of the models the popup offers', () => {
   assert.equal(DEFAULT_EXTENSION_SETTINGS.llmModel, DEFAULT_LLM_MODELS.gemini);
 });
 
-test('every offered model resolves to itself, so none is on the retired list', () => {
+test('every offered model passes through without an application migration', () => {
   for (const [provider, models] of Object.entries(LLM_MODEL_OPTIONS)) {
     for (const model of models) {
-      assert.equal(resolveProviderModel(provider, model.id), model.id, `${model.id} is listed but retired`);
+      assert.equal(resolveProviderModel(provider, model.id), model.id, `${model.id} is listed but migrated`);
       assert.equal(describeModelMigration(provider, model.id), null);
     }
   }
 });
 
 test('the picker no longer offers models with an announced shutdown', () => {
-  // OpenAI deprecations page, read 2026-09-07: gpt-5 / gpt-5-mini shut down
-  // 2026-12-11, gpt-4.1-nano 2026-10-23.
+  // OpenAI deprecations page, checked 2026-09-09: the GPT-5/mini snapshots
+  // have a 2026-12-11 shutdown; GPT-4.1 nano has a 2026-10-23 shutdown.
   const openai = LLM_MODEL_OPTIONS.openai.map((model) => model.id);
   for (const retired of ['gpt-5', 'gpt-5-mini', 'gpt-4.1-nano', 'gpt-4', 'gpt-3.5-turbo']) {
     assert.equal(openai.includes(retired), false, `${retired} is still offered`);
@@ -42,7 +42,7 @@ test('the picker no longer offers models with an announced shutdown', () => {
   assert.equal(claude.includes('claude-sonnet-4-20250514'), false);
 });
 
-test('retired IDs stored by older builds resolve to the replacement the provider documents', () => {
+test('known sunset IDs stored by older builds resolve to application replacements', () => {
   assert.equal(resolveProviderModel('gemini', 'gemini-2.0-flash'), 'gemini-2.5-flash');
   assert.equal(resolveProviderModel('gemini', 'gemini-2.0-flash-lite'), 'gemini-2.5-flash-lite');
   assert.equal(resolveProviderModel('gemini', 'gemini-1.5-flash'), 'gemini-2.5-flash');
@@ -58,6 +58,21 @@ test('retired IDs stored by older builds resolve to the replacement the provider
   assert.equal(resolveProviderModel('openai', 'gpt-5'), 'gpt-5.6-sol');
   assert.equal(resolveProviderModel('openai', 'gpt-5-2025-08-07'), 'gpt-5.6-sol');
   assert.equal(resolveProviderModel('openai', 'gpt-5-mini'), 'gpt-5.6-terra');
+});
+
+test('three retired Gemini previews migrate to documented same-tier application choices', () => {
+  const replacements = [
+    ['gemini-3-pro-preview', 'gemini-2.5-pro'],
+    ['gemini-3.1-flash-lite-preview', 'gemini-2.5-flash-lite'],
+    ['gemini-2.5-flash-lite-preview-09-2025', 'gemini-2.5-flash-lite'],
+  ];
+  for (const [from, to] of replacements) {
+    assert.equal(resolveProviderModel('gemini', from), to);
+    assert.deepEqual(describeModelMigration('gemini', from), { from, to, reason: 'retired' });
+  }
+  const unrecognized = 'gemini-3-pro-preview-custom';
+  assert.equal(resolveProviderModel('gemini', unrecognized), unrecognized);
+  assert.equal(describeModelMigration('gemini', unrecognized), null);
 });
 
 test('describeModelMigration reports why a stored value is not what gets sent', () => {
@@ -88,7 +103,7 @@ test('current and unknown-but-plausible IDs pass through untouched', () => {
   assert.equal(resolveProviderModel('openai', ''), 'gpt-4o-mini');
 });
 
-test('temperature is only sent to OpenAI models that accept it', () => {
+test('application sampling policy uses provider defaults for reasoning families', () => {
   assert.equal(openAiModelSupportsTemperature('gpt-4o-mini'), true);
   assert.equal(openAiModelSupportsTemperature('gpt-4.1'), true);
   assert.equal(openAiModelSupportsTemperature('gpt-5.6-terra'), false);

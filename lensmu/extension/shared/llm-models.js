@@ -1,26 +1,14 @@
 // One source of truth for LLM provider models: what the popup offers, what
-// each provider defaults to, and which stored IDs the providers have since
-// retired. Keep this file free of browser APIs; the popup, the service
+// each provider defaults to, and which stored IDs have application migration
+// rules. Keep this file free of browser APIs; the popup, the service
 // worker and the tests all import it.
 //
-// Checked against the provider model pages on 2026-09-07:
-//   - Google (ai.google.dev/gemini-api/docs/models): gemini-2.0-flash and
-//     gemini-2.0-flash-lite are shut down, the 1.5 generation and the
-//     2.5-pro preview IDs are gone; 2.5 Flash, 2.5 Flash-Lite, 2.5 Pro and
-//     the 3.x Flash line (3.8 Flash current) are served.
-//   - Anthropic (platform.claude.com/docs/en/models/overview): the Claude
-//     3.x family and claude-sonnet-4-20250514 are retired; claude-sonnet-5,
-//     claude-opus-5 and claude-haiku-4-5-20251001 are current. Sonnet
-//     4.5/4.6 and Opus 4.5-4.8 are still served as legacy models, so a
-//     stored ID from that range passes through unchanged even though the
-//     picker does not offer it.
-//   - OpenAI (developers.openai.com/api/docs/deprecations + /models):
-//     gpt-4, gpt-4-turbo, gpt-4.1-nano and gpt-3.5-turbo shut down on
-//     2026-10-23; gpt-5 and gpt-5-mini shut down on 2026-12-11. The
-//     documented replacements are the gpt-5.6 family (sol/terra/luna),
-//     which support Chat Completions and are reasoning models (no
-//     temperature is sent to them). gpt-4o, gpt-4o-mini, gpt-4.1 and
-//     gpt-4.1-mini have no deprecation listed.
+// Documentation checked 2026-09-09; details and primary-source links are in
+// docs/provider-qualification.md. All 13 picker IDs are documented, but this
+// is not an authenticated inference or account-access guarantee.
+// Known retired IDs and selected IDs with announced shutdowns migrate to
+// application-chosen replacements. These are not always the provider's own
+// recommended replacement. Unknown same-provider IDs remain user choices.
 
 export const LLM_MODEL_OPTIONS = Object.freeze({
   openai: Object.freeze([
@@ -56,10 +44,13 @@ const PROVIDER_MODEL_PREFIXES = Object.freeze({
   gemini: 'gemini-'
 });
 
-// Stored model IDs that no longer exist upstream (or are scheduled to shut
-// down), mapped to the replacement the provider documents. Order matters:
-// the first matching pattern wins.
+// Known retired or scheduled-for-shutdown IDs mapped to application choices
+// that are documented as available. This is not a complete provider catalog.
+// Order matters: the first matching pattern wins.
 const RETIRED_MODEL_REPLACEMENTS = Object.freeze([
+  [/^gemini-3-pro-preview$/, 'gemini-2.5-pro'],
+  [/^gemini-3\.1-flash-lite-preview$/, 'gemini-2.5-flash-lite'],
+  [/^gemini-2\.5-flash-lite-preview-09-2025$/, 'gemini-2.5-flash-lite'],
   [/^gemini-2\.0-flash-lite/, 'gemini-2.5-flash-lite'],
   [/^gemini-2\.0-/, 'gemini-2.5-flash'],
   [/^gemini-1\.5-pro/, 'gemini-2.5-pro'],
@@ -79,7 +70,7 @@ const RETIRED_MODEL_REPLACEMENTS = Object.freeze([
   [/^gpt-5(-\d{4}-\d{2}-\d{2})?$/, 'gpt-5.6-sol']
 ]);
 
-// Returns the replacement for a retired model ID, or null if it is current.
+// Returns a known migration, or null when no application rule matches.
 function getRetiredModelReplacement(model) {
   const trimmed = String(model || '').trim();
   for (const [pattern, replacement] of RETIRED_MODEL_REPLACEMENTS) {
@@ -93,10 +84,11 @@ function getRetiredModelReplacement(model) {
 /*
  * Explains what resolveProviderModel() will do with a stored value, so the
  * popup can tell the user and the request diagnostics can record it:
- *   null                                          — stored value used as-is
+ *   null                                        — stored value used as-is;
+ *                                                 availability not validated
  *   { from, to, reason: 'wrong-provider' }        — llmModel held another
  *                                                   provider's model
- *   { from, to, reason: 'retired' }               — the provider retired it
+ *   { from, to, reason: 'retired' }               — retired or announced sunset
  * Providers without a model rule (custom, libre) never migrate.
  */
 export function describeModelMigration(provider, configuredModel) {
@@ -117,15 +109,15 @@ export function describeModelMigration(provider, configuredModel) {
 
 // The model the request should actually name. llmModel is one setting
 // shared by every provider, so it may hold another provider's model, or an
-// ID the provider retired after it was stored; both resolve to something
-// the provider accepts today. Unknown providers keep the configured value.
+// ID covered by a migration rule. Unrecognized same-provider IDs pass through;
+// the provider remains authoritative about their actual availability.
 export function resolveProviderModel(provider, configuredModel) {
   const migration = describeModelMigration(provider, configuredModel);
   return migration ? migration.to : String(configuredModel || '').trim();
 }
 
-// OpenAI's reasoning models (gpt-5 family, o-series) reject any temperature
-// other than the default.
+// Keep default sampling for reasoning families. The picker only requests a
+// custom temperature for the non-reasoning GPT-4o and GPT-4.1 families.
 export function openAiModelSupportsTemperature(model) {
   return !/^(gpt-5|gpt-6|o\d)/.test(String(model || '').trim());
 }
