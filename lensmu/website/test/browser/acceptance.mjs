@@ -26,6 +26,7 @@ try {
       assert.equal(await page.locator('h1').count(),1,`${route}: one page heading`);
       const layout=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,missingAlt:[...document.images].filter(image=>!image.hasAttribute('alt')).length}));
       assert.ok(layout.scroll<=width,`${route} overflows at ${width}px`);assert.equal(layout.missingAlt,0);
+      if(route==='/install') assert.deepEqual(await page.locator('.install-steps li').nth(2).locator('code').allTextContents(),['chrome://extensions','lensmu/extension','manifest.json'],'Load unpacked points to the manifest directory, not the popup bundle');
       results.push({route,width,overflow:false});
       if(route==='/' && [390,1280].includes(width)) await page.screenshot({path:join(artifacts,`home-${width}.png`),fullPage:true});
     }
