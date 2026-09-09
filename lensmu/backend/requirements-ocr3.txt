@@ -1,0 +1,11 @@
+# Tested Paddle 3.2 / MangaOCR CPU profile (Python 3.12).
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+-c constraints/ocr3.txt
+
+paddlepaddle==3.2.2
+paddleocr==3.2.0
+manga-ocr==0.1.16
+torch==2.7.1
+torchvision==0.22.1
+transformers==4.51.3

@@ -1,56 +1,30 @@
-# =============================================================================
-# VisionTranslate — Backend Dockerfile
-# =============================================================================
-#
-# Containerizes the FastAPI OCR backend for easy setup and deployment.
-#
-# BUILD:
-#   docker build -t visiontranslate-backend .
-#
-# RUN:
-#   docker run -p 8000:8000 visiontranslate-backend
-#
-# RUN WITH OCR ENGINES (requires more disk space and build time):
-#   docker build --build-arg INSTALL_OCR=true -t visiontranslate-backend .
-#
-# The server will be available at http://localhost:8000
-# =============================================================================
+# Build: docker build --build-arg OCR_PROFILE=ocr2 -t lensmu-backend .
+# Run: docker run --rm -p 127.0.0.1:8000:8000 lensmu-backend
+FROM python:3.12-slim
 
-FROM python:3.11-slim
-
-ENV VISIONTRANSLATE_HOST=0.0.0.0
-
-# Build argument: set to "true" to install PaddleOCR and MangaOCR
-ARG INSTALL_OCR=false
-
+ENV VISIONTRANSLATE_HOST=0.0.0.0 PYTHONUNBUFFERED=1
+ARG OCR_PROFILE=core
 WORKDIR /app
 
-# Install system dependencies needed by image processing libraries
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
-    libglib2.0-0 \
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements*.txt ./
+COPY constraints/ constraints/
+RUN case "$OCR_PROFILE" in \
+      core) requirements=requirements.txt ;; \
+      ocr2) requirements=requirements-ocr.txt ;; \
+      ocr3) requirements=requirements-ocr3.txt ;; \
+      *) echo "Unknown OCR_PROFILE: $OCR_PROFILE" >&2; exit 2 ;; \
+    esac \
+    && pip install --no-cache-dir -r "$requirements" \
+    && pip check
 
-# Conditionally install OCR engine dependencies
-COPY requirements-ocr.txt .
-RUN if [ "$INSTALL_OCR" = "true" ]; then \
-        pip install --no-cache-dir paddlepaddle==2.6.2 && \
-        pip install --no-cache-dir -r requirements-ocr.txt; \
-    fi
-
-# Copy application code
-COPY . .
-
-# Expose the default port
+COPY server.py security.py image_decoder.py ocr_runtime.py ./
+COPY ocr_engines/ ocr_engines/
+RUN useradd --create-home --uid 10001 lensmu
+USER lensmu
 EXPOSE 8000
-
-# Health check — verify the server is responding
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
-# Run the server
 CMD ["python", "server.py"]

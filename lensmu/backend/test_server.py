@@ -18,11 +18,26 @@ import pytest
 from fastapi.testclient import TestClient
 import security
 import server
+from ocr_runtime import OcrRuntime
 
 from conftest import TINY_PNG
 
 
-client = TestClient(server.app)
+@pytest.fixture(autouse=True)
+def isolated_app(monkeypatch):
+    global client
+    app = server.create_app(OcrRuntime())
+    monkeypatch.setattr(server, "app", app)
+    client = TestClient(app)
+    yield
+    app.state.ocr_runtime.close()
+
+
+def install_runtime(monkeypatch, **factories):
+    server.app.state.ocr_runtime.close()
+    runtime = OcrRuntime(**factories)
+    monkeypatch.setattr(server.app.state, "ocr_runtime", runtime)
+    return runtime
 
 
 def find_middleware(middleware_class):
@@ -76,8 +91,7 @@ def install_fake_paddle(monkeypatch, process_image=None):
                 return []
             return process_image(image_bytes)
 
-    monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
-    monkeypatch.setattr(server, "PaddleOCREngine", FakePaddleEngine)
+    install_runtime(monkeypatch, paddle_factory=FakePaddleEngine.get_instance)
     return FakePaddleEngine
 
 
@@ -142,7 +156,7 @@ class TestPaddleOCRValidation:
 
     def test_missing_engine_is_a_501(self, monkeypatch):
         """Without PaddleOCR installed the route reports 501, not a decode error."""
-        monkeypatch.setattr(server, "PADDLE_AVAILABLE", False)
+        install_runtime(monkeypatch)
         response = client.post("/ocr/paddle", json={"image": "not-valid-base64!!!"})
         assert response.status_code == 501
 
@@ -165,15 +179,12 @@ class TestPaddleOCRValidation:
         assert response.status_code == 413
         assert "Image too large" in response.json()["detail"]
 
-    def test_engine_value_error_is_a_400_and_other_failures_a_500(self, monkeypatch):
-        def broken_image(_image_bytes):
-            raise ValueError("Could not decode image: bad header")
-
-        install_fake_paddle(monkeypatch, process_image=broken_image)
-        payload = {"image": base64.b64encode(TINY_PNG).decode(), "lang": "en"}
-        response = client.post("/ocr/paddle", json=payload)
+    def test_corrupt_image_is_a_400_and_engine_failures_are_a_500(self, monkeypatch):
+        install_fake_paddle(monkeypatch)
+        response = client.post("/ocr/paddle", json={"image": base64.b64encode(b"bad header").decode()})
         assert response.status_code == 400
         assert "Could not decode image" in response.json()["detail"]
+        payload = {"image": base64.b64encode(TINY_PNG).decode(), "lang": "en"}
 
         def crashed_engine(_image_bytes):
             raise RuntimeError("CUDA out of memory")
@@ -197,7 +208,7 @@ class TestMangaOCRValidation:
         assert response.status_code == 422
 
     def test_missing_engine_is_a_501(self, monkeypatch):
-        monkeypatch.setattr(server, "MANGA_AVAILABLE", False)
+        install_runtime(monkeypatch)
         response = client.post(
             "/ocr/manga",
             json={"image": base64.b64encode(TINY_PNG).decode(), "bboxes": [[0, 0, 1, 1]]},
@@ -279,7 +290,8 @@ class TestPaddleLanguageContract:
 
     def test_mocked_paddle_response_and_language_routing(self, monkeypatch):
         def recognise(image_bytes):
-            assert image_bytes == TINY_PNG
+            assert image_bytes.size == (4, 4)
+            assert image_bytes.mode == "RGB"
             return [{
                 "text": "hola",
                 "bbox": [1, 2, 11, 12],
@@ -314,12 +326,12 @@ class TestMangaOCRContract:
                 return cls._instance is not None
 
             def process_regions(self, image_bytes, bboxes):
-                assert image_bytes == TINY_PNG
+                assert image_bytes.size == (4, 4)
+                assert image_bytes.mode == "RGB"
                 type(self).requested_regions = bboxes
                 return [{"text": "こんにちは", "bbox": bboxes[0]}]
 
-        monkeypatch.setattr(server, "MANGA_AVAILABLE", True)
-        monkeypatch.setattr(server, "MangaOCREngine", FakeMangaEngine)
+        install_runtime(monkeypatch, manga_factory=lambda _key: FakeMangaEngine.get_instance())
         bbox = [0, 0, 1, 1]
         response = client.post(
             "/ocr/manga",
@@ -331,7 +343,7 @@ class TestMangaOCRContract:
 
         assert response.status_code == 200
         assert FakeMangaEngine.requested_regions == [bbox]
-        assert response.json()["detections"] == [{"text": "こんにちは", "bbox": bbox}]
+        assert response.json()["detections"] == [{"text": "こんにちは", "bbox": bbox, "status": "recognized"}]
 
 
 class TestRequestLimits:
@@ -481,8 +493,7 @@ class TestHealthDuringModelLoad:
             def process_image(self, image_bytes):
                 return []
 
-        monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
-        monkeypatch.setattr(server, "PaddleOCREngine", SlowPaddleEngine)
+        install_runtime(monkeypatch, paddle_factory=SlowPaddleEngine.get_instance)
 
         async def scenario():
             transport = httpx.ASGITransport(app=server.app)
@@ -534,8 +545,7 @@ class TestHealthDuringModelLoad:
             def get_loading_languages(cls):
                 return []
 
-        monkeypatch.setattr(server, "PADDLE_AVAILABLE", True)
-        monkeypatch.setattr(server, "PaddleOCREngine", CountingEngine)
+        install_runtime(monkeypatch, paddle_factory=CountingEngine.get_instance)
         for _ in range(3):
             assert client.get("/health").status_code == 200
         assert calls == []

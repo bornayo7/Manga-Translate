@@ -1,7 +1,11 @@
-venv/
-__pycache__/
+**/venv*/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
 *.pyc
 .env
+.env.*
 .git
-test_server.py
 README.md
+test_*.py
+conftest.py

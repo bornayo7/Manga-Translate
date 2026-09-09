@@ -9,7 +9,10 @@ from starlette.responses import JSONResponse
 
 logger = logging.getLogger("vt.security")
 
-MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024      # 10 MB
+if __package__:
+    from .image_decoder import MAX_IMAGE_SIZE_BYTES
+else:
+    from image_decoder import MAX_IMAGE_SIZE_BYTES
 MAX_REQUEST_BODY_BYTES = 15 * 1024 * 1024    # 15 MB (base64 overhead)
 RATE_LIMIT_MAX_REQUESTS = 60
 RATE_LIMIT_WINDOW_SECONDS = 60

@@ -1,42 +1,12 @@
-# =============================================================================
-# VisionTranslate — OCR Engine Dependencies (optional)
-# =============================================================================
-#
-# These are separated from the core requirements because PaddlePaddle has
-# platform-specific installation steps and doesn't support all Python versions.
-#
-# COMPATIBILITY:
-#   - The backend itself needs Python 3.10-3.12 (server.py uses 3.10 syntax).
-#   - paddlepaddle 2.6.2 ships wheels for Python 3.8-3.12 only (PyPI, checked
-#     2026-09-07); Python 3.13+ is NOT supported. If you're on 3.13+, skip
-#     PaddleOCR and use Tesseract.js (in-browser) or Google Cloud Vision instead.
-#   - manga-ocr 0.1.16 requires Python >=3.9 and PyTorch.
-#
-# INSTALL PADDLEPADDLE (pick ONE based on your platform):
-#
-#   macOS (Apple Silicon / Intel):
-#     pip install paddlepaddle==2.6.2 -f https://www.paddlepaddle.org.cn/whl/mac/cpu/paddlepaddle.html
-#
-#   Linux (CPU only):
-#     pip install paddlepaddle==2.6.2
-#
-#   Linux (NVIDIA GPU — much faster, requires CUDA 11.8+):
-#     pip install paddlepaddle-gpu==2.6.2
-#
-#   Windows (CPU only):
-#     pip install paddlepaddle==2.6.2
-#
-# THEN install PaddleOCR and MangaOCR:
-#   pip install "paddleocr>=2.7.0,<3.0" "manga-ocr>=0.1.8"
-#
-# FIRST-RUN MODEL DOWNLOADS:
-#   - PaddleOCR downloads detection + recognition models (~100 MB) on first use.
-#   - MangaOCR downloads a ~400 MB model (fine-tuned Vision Encoder-Decoder).
-#   These are cached, so subsequent runs are fast.
-# =============================================================================
+# Tested Paddle 2.10 / MangaOCR CPU profile (Python 3.12).
+# CPU index prevents an unintended multi-gigabyte CUDA installation on Linux.
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+-c constraints/ocr2.txt
 
-paddleocr>=2.7.0,<3.0     # 2.x line: matches the pinned paddlepaddle==2.6.2 above.
-                          # PaddleOCR 3.x needs PaddlePaddle 3.x; the backend adapter
-                          # supports both APIs, so to use 3.x install paddlepaddle>=3.0
-                          # and paddleocr>=3.0 together instead.
-manga-ocr>=0.1.8          # specialized Japanese manga text recognition
+paddlepaddle==2.6.2
+paddleocr==2.10.0
+manga-ocr==0.1.16
+torch==2.7.1
+torchvision==0.22.1
+transformers==4.51.3

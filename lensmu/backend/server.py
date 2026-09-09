@@ -15,45 +15,18 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from typing import Literal
 from pydantic import BaseModel, Field, StrictInt, field_validator
 
 if __package__:
     from .security import add_security_middleware, validate_image_size
+    from .ocr_runtime import OcrError, OcrRuntime, create_default_runtime
 else:
     from security import add_security_middleware, validate_image_size
-
-# OCR engines are optional heavy deps -- server starts without them and
-# reports availability via /health.
-
-try:
-    if __package__:
-        from .ocr_engines.paddle_ocr import PaddleOCREngine
-    else:
-        from ocr_engines.paddle_ocr import PaddleOCREngine
-    PADDLE_AVAILABLE = True
-except ImportError as e:
-    PADDLE_AVAILABLE = False
-    PaddleOCREngine = None  # type: ignore
-    logging.getLogger("vt").warning(
-        f"PaddleOCR not available: {e}. "
-        "Install with: pip install paddlepaddle paddleocr"
-    )
-
-try:
-    if __package__:
-        from .ocr_engines.manga_ocr import MangaOCREngine
-    else:
-        from ocr_engines.manga_ocr import MangaOCREngine
-    MANGA_AVAILABLE = True
-except ImportError as e:
-    MANGA_AVAILABLE = False
-    MangaOCREngine = None  # type: ignore
-    logging.getLogger("vt").warning(
-        f"MangaOCR not available: {e}. "
-        "Install with: pip install manga-ocr"
-    )
+    from ocr_runtime import OcrError, OcrRuntime, create_default_runtime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,12 +108,16 @@ class MangaOCRRequest(BaseModel):
 class MangaOCRDetection(BaseModel):
     text: str
     bbox: list[int]
+    status: Literal["recognized", "empty", "failed", "outside_image"] = "recognized"
+    error: str | None = None
 
 
 class MangaOCRResponse(BaseModel):
     detections: list[MangaOCRDetection]
     count: int
     processing_time_ms: float
+    failed_regions: list[int] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -156,64 +133,55 @@ class HealthResponse(BaseModel):
     paddle_loading_languages: list[str] = Field(default_factory=list)
 
 
-# -- App lifespan --------------------------------------------------------------
-# Models are lazy-loaded on first request, not at startup.
+# -- HTTP composition ----------------------------------------------------------
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("=" * 60)
-    logger.info("VisionTranslate backend starting up")
-    logger.info("API docs available at http://localhost:8000/docs")
-    logger.info("PaddleOCR: %s", "AVAILABLE" if PADDLE_AVAILABLE else "NOT INSTALLED")
-    logger.info("MangaOCR:  %s", "AVAILABLE" if MANGA_AVAILABLE else "NOT INSTALLED")
-    if not (PADDLE_AVAILABLE or MANGA_AVAILABLE):
-        logger.warning(
-            "No OCR engines installed! OCR endpoints will return 501 errors. "
-            "Install deps with: pip install -r requirements-ocr.txt"
+router = APIRouter()
+
+
+def get_runtime(request: Request) -> OcrRuntime:
+    return request.app.state.ocr_runtime
+
+
+def create_app(runtime: OcrRuntime | None = None) -> FastAPI:
+    runtime = runtime if runtime is not None else create_default_runtime()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logger.info("VisionTranslate backend starting: %s", runtime.status())
+        yield
+        await asyncio.to_thread(runtime.close)
+
+    application = FastAPI(
+        title="VisionTranslate OCR Backend", version="1.0.0", lifespan=lifespan,
+        description="Local, bounded OCR for the lensmu browser extension.",
+    )
+    application.state.ocr_runtime = runtime
+    add_security_middleware(application)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            f"http://{host}{port}"
+            for host in ("localhost", "127.0.0.1")
+            for port in ("", ":3000", ":5173", ":8080")
+        ],
+        allow_origin_regex=r"^(chrome-extension|moz-extension)://.*$",
+        allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"],
+    )
+
+    @application.exception_handler(OcrError)
+    async def ocr_error_handler(_request: Request, error: OcrError):
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"detail": str(error), "code": error.code},
+            headers={"Retry-After": "1"} if error.status_code == 429 else None,
         )
-    logger.info("=" * 60)
-    yield
-    logger.info("VisionTranslate backend shutting down")
+
+    application.include_router(router)
+    return application
 
 
-# -- FastAPI app ---------------------------------------------------------------
+# -- Input contract ------------------------------------------------------------
 
-app = FastAPI(
-    title="VisionTranslate OCR Backend",
-    description=(
-        "Local OCR server for the VisionTranslate browser extension. "
-        "Provides PaddleOCR text detection and MangaOCR Japanese recognition."
-    ),
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-# Security middleware must be added BEFORE CORS (middleware runs in reverse order).
-add_security_middleware(app)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8080",
-        "http://127.0.0.1",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:8080",
-    ],
-    allow_origin_regex=r"^(chrome-extension|moz-extension)://.*$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# -- Helpers -------------------------------------------------------------------
-
-PADDLE_INFERENCE_SEMAPHORE = asyncio.Semaphore(1)
-MANGA_INFERENCE_SEMAPHORE = asyncio.Semaphore(1)
 PADDLE_LANGUAGE_ALIASES = {
     "auto": "japan",
     "ja": "japan",
@@ -263,74 +231,25 @@ def decode_base64_image(base64_string: str) -> bytes:
 
 # -- Endpoints -----------------------------------------------------------------
 
-def _engine_status_snapshot() -> dict:
-    """
-    Read the engines' state without ever waiting on a model load.
-
-    The engine wrappers keep their cache maps behind a lock that is only
-    held for dictionary operations; model construction happens under a
-    separate lock, so these reads return immediately while a model loads.
-    They are still run off the event loop (see health_check) so an
-    unexpected contention can never stall other requests.
-    """
-    loaded_languages = PaddleOCREngine.get_loaded_languages() if PADDLE_AVAILABLE else []
-    loading_languages = (
-        list(getattr(PaddleOCREngine, "get_loading_languages", lambda: [])())
-        if PADDLE_AVAILABLE
-        else []
-    )
-    manga_loaded = MANGA_AVAILABLE and MangaOCREngine.is_loaded()
-    manga_loading = MANGA_AVAILABLE and bool(getattr(MangaOCREngine, "is_loading", lambda: False)())
-    return {
-        "paddle_loaded_languages": loaded_languages,
-        "paddle_loading_languages": loading_languages,
-        "manga_loaded": bool(manga_loaded),
-        "manga_loading": bool(manga_loading),
-    }
+@router.get("/health", response_model=HealthResponse, summary="Health check")
+async def health_check(runtime: OcrRuntime = Depends(get_runtime)) -> HealthResponse:
+    return HealthResponse(status="ok", **runtime.status())
 
 
-@app.get("/health", response_model=HealthResponse, summary="Health check")
-async def health_check() -> HealthResponse:
-    snapshot = await asyncio.to_thread(_engine_status_snapshot)
-    loaded_languages = snapshot["paddle_loaded_languages"]
-    return HealthResponse(
-        status="ok",
-        paddle_ocr_available=PADDLE_AVAILABLE,
-        paddle_ocr_loaded=bool(loaded_languages),
-        paddle_ocr_loading=bool(snapshot["paddle_loading_languages"]),
-        manga_ocr_available=MANGA_AVAILABLE,
-        manga_ocr_loaded=snapshot["manga_loaded"],
-        manga_ocr_loading=snapshot["manga_loading"],
-        manga_full_available=PADDLE_AVAILABLE and MANGA_AVAILABLE,
-        paddle_loaded_languages=loaded_languages,
-        paddle_loading_languages=snapshot["paddle_loading_languages"],
-    )
-
-
-@app.post("/ocr/paddle", response_model=PaddleOCRResponse, summary="Detect text with PaddleOCR")
-async def paddle_ocr(request: PaddleOCRRequest) -> PaddleOCRResponse:
-    if not PADDLE_AVAILABLE:
-        raise HTTPException(
-            status_code=501,
-            detail="PaddleOCR is not installed. See requirements-ocr.txt.",
-        )
-
-    start_time = time.time()
+@router.post("/ocr/paddle", response_model=PaddleOCRResponse, summary="Detect text with PaddleOCR")
+async def paddle_ocr(
+    request: PaddleOCRRequest, runtime: OcrRuntime = Depends(get_runtime),
+) -> PaddleOCRResponse:
+    if not runtime.status()["paddle_ocr_available"]:
+        raise OcrError("PaddleOCR is not installed. See requirements-ocr.txt.",
+                       status_code=501, code="ocr_unavailable")
+    start_time = time.perf_counter()
     language = normalize_paddle_language(request.lang)
     image_bytes = decode_base64_image(request.image)
     validate_image_size(image_bytes)
+    detections = await runtime.paddle(image_bytes, language)
 
-    try:
-        async with PADDLE_INFERENCE_SEMAPHORE:
-            engine = await asyncio.to_thread(PaddleOCREngine.get_instance, language)
-            detections = await asyncio.to_thread(engine.process_image, image_bytes)
-    except Exception as e:
-        logger.error(f"PaddleOCR processing failed: {e}")
-        if isinstance(e, ValueError):
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        raise HTTPException(status_code=500, detail=f"OCR processing failed: {e}")
-
-    elapsed_ms = (time.time() - start_time) * 1000
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
     logger.info(f"PaddleOCR: {len(detections)} regions in {elapsed_ms:.1f}ms")
 
     return PaddleOCRResponse(
@@ -340,47 +259,38 @@ async def paddle_ocr(request: PaddleOCRRequest) -> PaddleOCRResponse:
     )
 
 
-@app.post("/ocr/manga", response_model=MangaOCRResponse, summary="Recognize Japanese text with MangaOCR")
-async def manga_ocr(request: MangaOCRRequest) -> MangaOCRResponse:
-    if not MANGA_AVAILABLE:
-        raise HTTPException(
-            status_code=501,
-            detail="MangaOCR is not installed. See requirements-ocr.txt.",
-        )
-
-    start_time = time.time()
-
-    if not request.bboxes:
-        raise HTTPException(
-            status_code=400,
-            detail="No bounding boxes provided. Send bboxes from /ocr/paddle.",
-        )
-
+@router.post("/ocr/manga", response_model=MangaOCRResponse, summary="Recognize Japanese text with MangaOCR", response_model_exclude_none=True)
+async def manga_ocr(
+    request: MangaOCRRequest, runtime: OcrRuntime = Depends(get_runtime),
+) -> MangaOCRResponse:
+    if not runtime.status()["manga_ocr_available"]:
+        raise OcrError("MangaOCR is not installed. See requirements-ocr.txt.",
+                       status_code=501, code="ocr_unavailable")
+    start_time = time.perf_counter()
     image_bytes = decode_base64_image(request.image)
     validate_image_size(image_bytes)
+    detections = await runtime.manga(image_bytes, request.bboxes)
+    failed_regions = [i for i, detection in enumerate(detections) if detection.get("status") == "failed"]
+    skipped_regions = [i for i, detection in enumerate(detections) if detection.get("status") == "outside_image"]
+    warnings = []
+    if failed_regions:
+        warnings.append(f"MangaOCR failed to recognize {len(failed_regions)} region(s).")
+    if skipped_regions:
+        warnings.append(f"{len(skipped_regions)} region(s) were outside the image.")
 
-    try:
-        async with MANGA_INFERENCE_SEMAPHORE:
-            engine = await asyncio.to_thread(MangaOCREngine.get_instance)
-            detections = await asyncio.to_thread(
-                engine.process_regions,
-                image_bytes,
-                request.bboxes,
-            )
-    except Exception as e:
-        logger.error(f"MangaOCR processing failed: {e}")
-        if isinstance(e, ValueError):
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        raise HTTPException(status_code=500, detail=f"MangaOCR processing failed: {e}")
-
-    elapsed_ms = (time.time() - start_time) * 1000
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
     logger.info(f"MangaOCR: {len(detections)} regions in {elapsed_ms:.1f}ms")
 
     return MangaOCRResponse(
         detections=[MangaOCRDetection(**d) for d in detections],
+        failed_regions=failed_regions,
+        warnings=warnings,
         count=len(detections),
         processing_time_ms=round(elapsed_ms, 1),
     )
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
