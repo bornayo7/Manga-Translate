@@ -105,16 +105,24 @@ export function decodeBackendOcrResponse(data, { engine = 'paddle', expectedCoun
   }
   const detections = data.detections.map((item, index) => {
     const box = item?.bbox;
+    const outside = item?.status === 'outside_image' && item.text === '';
     if (!item || typeof item.text !== 'string' || !Array.isArray(box) || box.length !== 4 ||
         box.some(value => typeof value !== 'number' || !Number.isFinite(value)) ||
-        box[0] < 0 || box[1] < 0 || box[2] <= box[0] || box[3] <= box[1] ||
+        box[0] < 0 || box[1] < 0 || box[2] < box[0] || box[3] < box[1] ||
+        (!outside && (box[2] === box[0] || box[3] === box[1])) ||
         (item.confidence !== undefined && (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence)))) {
       throw new Error(`${engine} OCR returned an invalid region at position ${index + 1}.`);
     }
     if (item.error !== undefined && item.error !== null && typeof item.error !== 'string') {
       throw new Error(`${engine} OCR returned an invalid region error.`);
     }
-    return { ...item, bbox: box.slice() };
+    if (item.status !== undefined && !['recognized', 'empty', 'failed', 'outside_image'].includes(item.status)) {
+      throw new Error(`${engine} OCR returned an invalid region status.`);
+    }
+    const failed = item.status === 'failed' || Boolean(item.error);
+    return { ...item, bbox: box.slice(),
+      text: failed || outside || item.status === 'empty' ? '' : item.text,
+      ...(failed ? { error: item.error || 'Recognition failed.' } : {}) };
   });
   if (detections.length && detections.every(item => item.error)) {
     throw new Error(`${engine} OCR failed to recognize every requested region.`);
@@ -122,6 +130,8 @@ export function decodeBackendOcrResponse(data, { engine = 'paddle', expectedCoun
   const warnings = Array.isArray(data.warnings) ? data.warnings.filter(item => typeof item === 'string') : [];
   const failed = detections.filter(item => item.error).length;
   if (failed) warnings.push(`${engine} OCR failed on ${failed} region${failed === 1 ? '' : 's'}; fallback recognition is identified separately.`);
+  const outside = detections.filter(item => item.status === 'outside_image').length;
+  if (outside) warnings.push(`${engine} OCR skipped ${outside} region${outside === 1 ? '' : 's'} outside the image.`);
   return { detections, warnings };
 }
 

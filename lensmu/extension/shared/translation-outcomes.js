@@ -56,6 +56,8 @@ export function buildTranslationEntries(blocks = [], translations = [], reported
     const status =
       entryReport.status === 'skipped'
         ? 'skipped'
+        : entryReport.status === 'failed'
+          ? 'failed'
         : translation.length > 0
           ? 'translated'
           : 'failed';
@@ -86,6 +88,14 @@ export function classifyTranslations({
   targetLanguage = 'en'
 } = {}) {
   const entries = buildTranslationEntries(blocks, translations, reportedOutcomes);
+  if (languagesClearlyDiffer(sourceLanguage, targetLanguage)) {
+    for (const entry of entries) {
+      if (entry.status === 'translated' && entry.identical) {
+        entry.status = 'failed';
+        entry.reason = 'identical-output';
+      }
+    }
+  }
   const translated = entries.filter((entry) => entry.status === 'translated');
   const skipped = entries.filter((entry) => entry.status === 'skipped');
   const failed = entries.filter((entry) => entry.status === 'failed');
@@ -96,12 +106,7 @@ export function classifyTranslations({
     /* Nothing was ever sent: neutral, and the reason says why. */
     verdict = { status: 'skipped', reason: skipped[0]?.reason || 'skipped' };
   } else if (translated.length === 0) {
-    verdict = { status: 'failed', reason: 'empty-provider-output' };
-  } else if (
-    languagesClearlyDiffer(sourceLanguage, targetLanguage) &&
-    translated.every((entry) => entry.identical)
-  ) {
-    verdict = { status: 'failed', reason: 'identical-output' };
+    verdict = { status: 'failed', reason: failed[0]?.reason || 'empty-provider-output' };
   }
 
   return { entries, translated, skipped, failed, verdict };

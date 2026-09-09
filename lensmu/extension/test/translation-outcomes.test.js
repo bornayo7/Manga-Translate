@@ -117,3 +117,18 @@ test('one failed block among translated ones still renders the rest', () => {
   assert.equal(result.failed.length, 1);
   assert.equal(result.failed[0].index, 1);
 });
+
+test('a failed provider outcome stays failed even when it includes source text', () => {
+  const result = classifyTranslations({ blocks: blocks('こんにちは'), translations: ['こんにちは'],
+    reportedOutcomes: [{ status: 'failed', reason: 'provider-refused' }] });
+  assert.equal(result.translated.length, 0);
+  assert.deepEqual(result.verdict, { status: 'failed', reason: 'provider-refused' });
+});
+
+test('an echoed region in a mixed result cannot be painted as translated', () => {
+  const result = classifyTranslations({ blocks: blocks('こんにちは', 'さようなら'), translations: ['Hello', 'さようなら'],
+    sourceLanguage: 'ja', targetLanguage: 'en' });
+  assert.equal(result.verdict, null);
+  assert.deepEqual(result.translated.map(entry => entry.index), [0]);
+  assert.deepEqual(result.failed.map(entry => [entry.index, entry.reason]), [[1, 'identical-output']]);
+});

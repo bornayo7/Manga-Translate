@@ -46,6 +46,15 @@ test('ensureTranslatedText still rejects a genuinely empty payload', () => {
   assert.throws(() => ensureTranslatedText('', 'text', 'MyMemory'), /empty translatedText payload/);
 });
 
+test('malformed success cannot turn JSON objects or numbers into translated text', () => {
+  for (const value of [null, undefined, 123, true, [], { unexpected: 'shape' }]) {
+    assert.throws(() => ensureTranslatedText(value, 'こんにちは'), /invalid translatedText/);
+  }
+  for (const value of [null, [], { responseStatus: 'not-a-status' }, { responseStatus: {} }, { responseStatus: null }]) {
+    assert.throws(() => assertMyMemoryStatus(value), /invalid response/);
+  }
+});
+
 test('assertMyMemoryStatus reads the real outcome out of a 200 body', () => {
   assert.doesNotThrow(() => assertMyMemoryStatus({ responseStatus: 200, responseData: { translatedText: 'Hi' } }));
   assert.doesNotThrow(() => assertMyMemoryStatus({ responseStatus: '200' }));

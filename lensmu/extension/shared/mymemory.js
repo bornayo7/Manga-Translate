@@ -63,8 +63,15 @@ export function buildMyMemoryLangPair(sourceLanguage, targetLang) {
  * translatedText, sometimes with the warning text handled below).
  */
 export function assertMyMemoryStatus(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('MyMemory returned an invalid response payload.');
+  }
   const responseStatus = Number(data?.responseStatus ?? 200);
-  if (Number.isFinite(responseStatus) && responseStatus !== 200) {
+  if (!Number.isInteger(responseStatus) ||
+      (data.responseStatus !== undefined && !['number', 'string'].includes(typeof data.responseStatus))) {
+    throw new Error('MyMemory returned an invalid response status.');
+  }
+  if (responseStatus !== 200) {
     throw new Error(`MyMemory error (${responseStatus}): ${data?.responseDetails || 'Unknown error'}`);
   }
 
@@ -84,7 +91,10 @@ export function assertMyMemoryStatus(data) {
  * back, and a console warning when a translation did.
  */
 export function ensureTranslatedText(rawTranslatedText, originalText, providerName = 'MyMemory') {
-  const raw = String(rawTranslatedText || '').trim();
+  if (typeof rawTranslatedText !== 'string') {
+    throw new Error(`${providerName} returned an invalid translatedText payload (expected text).`);
+  }
+  const raw = rawTranslatedText.trim();
   const warningIndex = raw.search(/MYMEMORY WARNING:/i);
   const cleaned = (warningIndex === -1 ? raw : raw.slice(0, warningIndex)).trim();
 

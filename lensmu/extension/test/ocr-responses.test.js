@@ -161,3 +161,16 @@ test('backend decoder distinguishes malformed success, no text and partial error
   assert.equal(partial.warnings.length, 1);
   assert.throws(() => decodeBackendOcrResponse({ detections: [detections[0]] }, { engine: 'manga' }), /every requested region/);
 });
+
+test('explicit Manga outside-image and failed regions preserve indices without becoming recognized text', async () => {
+  const { decodeBackendOcrResponse } = await import('../shared/ocr-responses.js');
+  const result = decodeBackendOcrResponse({ detections: [
+    { text: '', bbox: [100, 100, 100, 100], status: 'outside_image' },
+    { text: 'do not accept this stale text', bbox: [0, 0, 10, 10], status: 'failed' },
+    { text: 'recognized', bbox: [0, 0, 20, 20], status: 'recognized' }
+  ] }, { engine: 'manga', expectedCount: 3 });
+  assert.deepEqual(result.detections.map(item => item.text), ['', '', 'recognized']);
+  assert.ok(result.warnings.some(item => item.includes('outside the image')));
+  assert.ok(result.warnings.some(item => item.includes('failed on 1 region')));
+  assert.throws(() => decodeBackendOcrResponse({ detections: [{ text: '', bbox: [1, 1, 1, 1] }] }), /invalid region/);
+});
