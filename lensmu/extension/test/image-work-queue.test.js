@@ -69,8 +69,9 @@ test('the same key is one job, and its callers share the result', async () => {
     return 'once';
   };
 
-  const first = queue.schedule('same', {}, 1, task);
-  const second = queue.schedule('same', {}, 2, task);
+  const owner = {};
+  const first = queue.schedule('same', owner, 1, task);
+  const second = queue.schedule('same', owner, 2, task);
   assert.equal(first, second, 'the same pending promise is handed back');
   assert.deepEqual(await Promise.all([first, second]), ['once', 'once']);
   assert.equal(runs, 1);
@@ -94,7 +95,7 @@ test('different keys on one element stay separate jobs', async () => {
   assert.deepEqual(await click, { status: 'rendered' });
 });
 
-test('a queued job for a stale key is dropped when the element gets a new one', async () => {
+test('the owner explicitly drops obsolete revisions before queueing a new one', async () => {
   const element = { id: 'img' };
   let staleRan = false;
   const queue = createImageWorkQueue({ getLimit: () => 1 });
@@ -104,6 +105,7 @@ test('a queued job for a stale key is dropped when the element gets a new one', 
   const stale = queue.schedule('render::sourceA', element, 1, async () => {
     staleRan = true;
   });
+  queue.drop(element);
   const fresh = queue.schedule('render::sourceB', element, 1, async () => 'B');
 
   assert.equal(await stale, null, 'the superseded entry resolves without running');

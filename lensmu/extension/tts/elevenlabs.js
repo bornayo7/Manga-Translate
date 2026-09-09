@@ -332,12 +332,13 @@ function buildCacheDescriptor({
   };
 }
 
-export async function loadElevenLabsVoices(rawSettings = {}) {
+export async function loadElevenLabsVoices(rawSettings = {}, { signal } = {}) {
   const settings = normalizeElevenLabsSettings(rawSettings);
   ensureConfigured(settings, { requireVoiceId: false });
 
   const response = await fetchWithTimeout("https://api.elevenlabs.io/v1/voices", {
     method: "GET",
+    signal,
     headers: {
       "xi-api-key": settings.apiKey,
       Accept: "application/json",
@@ -392,7 +393,9 @@ export async function generateReadAloudAudio({
   translationHash,
   settings: rawSettings = {},
   cacheAudio = true,
+  signal,
 }) {
+  signal?.throwIfAborted();
   const normalizedText = normalizeText(text);
 
   if (!normalizedText) {
@@ -417,6 +420,7 @@ export async function generateReadAloudAudio({
 
   if (cacheAudio) {
     const hit = await mutateCacheState((cache, index) => {
+      signal?.throwIfAborted();
       invalidateStaleAudio(cache, index, normalizedFingerprint, normalizedTranslationHash);
       const cachedEntry = cache[cacheKey];
       if (!cachedEntry?.audioDataUrl) {
@@ -428,6 +432,7 @@ export async function generateReadAloudAudio({
     });
 
     if (hit.entry) {
+      signal?.throwIfAborted();
       return {
         audioDataUrl: hit.entry.audioDataUrl,
         cacheKey,
@@ -443,6 +448,7 @@ export async function generateReadAloudAudio({
     )}?output_format=${encodeURIComponent(settings.outputFormat)}`,
     {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         "xi-api-key": settings.apiKey,
@@ -475,6 +481,7 @@ export async function generateReadAloudAudio({
 
   if (cacheAudio) {
     const stored = await mutateCacheState((cache, index) => {
+      signal?.throwIfAborted();
       /*
        * While the provider was working the content script may have synced
        * a newer translation for this image. Storing this clip would

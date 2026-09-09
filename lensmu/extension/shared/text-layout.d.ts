@@ -41,3 +41,11 @@ export function layoutTextBlock(options: {
   isVertical?: boolean;
   tuning?: Partial<TextLayoutTuning>;
 }): TextLayout;
+
+export type TextDisplayPlan = TextLayout & {
+  placements: Array<{ text: string; x: number; y: number }>;
+};
+
+export function createTextDisplayPlan(options: Parameters<typeof layoutTextBlock>[0] & {
+  alignment?: 'left' | 'center' | 'right';
+}): TextDisplayPlan;

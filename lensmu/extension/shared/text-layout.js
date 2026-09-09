@@ -297,3 +297,37 @@ export function layoutTextBlock({
 
   return bestLayout;
 }
+
+/** A fitted plan in region-relative coordinates. Paint never tokenizes again. */
+export function createTextDisplayPlan(options) {
+  const layout = layoutTextBlock(options);
+  const placements = [];
+  if (!layout.fits) return { ...layout, placements };
+
+  const { maxWidth, maxHeight, measureText, alignment = 'left' } = options;
+  const tuning = { ...TEXT_LAYOUT_TUNING, ...(options.tuning || {}) };
+  if (layout.orientation === 'vertical') {
+    const pitch = layout.fontSize * tuning.verticalColumnWidthRatio;
+    for (const [columnIndex, column] of layout.lines.entries()) {
+      const glyphs = splitGraphemes(column);
+      const top = Math.max(0, (maxHeight - glyphs.length * layout.lineHeight) / 2);
+      for (const [index, text] of glyphs.entries()) {
+        placements.push({
+          text,
+          x: maxWidth - (columnIndex + 1) * pitch + (pitch - measureText(text, layout.fontSize)) / 2,
+          y: top + index * layout.lineHeight
+        });
+      }
+    }
+  } else {
+    const top = alignment === 'center' && layout.lines.length <= 2
+      ? Math.max(0, (maxHeight - layout.lines.length * layout.lineHeight) / 2)
+      : 0;
+    for (const [index, text] of layout.lines.entries()) {
+      const width = measureText(text, layout.fontSize);
+      const x = alignment === 'center' ? (maxWidth - width) / 2 : alignment === 'right' ? maxWidth - width : 0;
+      placements.push({ text, x, y: top + index * layout.lineHeight });
+    }
+  }
+  return { ...layout, placements };
+}

@@ -272,10 +272,17 @@ export class FakeElement {
 
   // Minimal canvas surface for createOverlay()/imageToBase64().
   getContext() {
+    if (this.context) return this.context;
     const canvas = this;
-    return {
+    const calls = [];
+    return this.context = {
+      canvas, calls, font: '12px sans-serif',
       scale() {},
       clearRect() {},
+      beginPath() {}, roundRect() {}, fill() {}, moveTo() {}, lineTo() {}, stroke() {},
+      strokeText() {},
+      fillText(text, x, y) { calls.push({ text, x, y }); },
+      measureText(text) { return { width: Array.from(text).length * parseFloat(this.font) * 0.6 }; },
       /*
        * Record whose pixels landed here. imageToBase64() draws an image
        * onto an offscreen canvas and sends toDataURL()'s output onward, so
@@ -288,13 +295,13 @@ export class FakeElement {
           source?.currentSrc || source?.src || source?._src || canvas.drawnFrom || '';
       },
       fillRect() {},
-      getImageData() {
-        return { data: new Uint8ClampedArray(4) };
+      getImageData(x, y, width = 1, height = 1) {
+        return { width, height, data: new Uint8ClampedArray(width * height * 4) };
       }
     };
   }
   toDataURL(type = 'image/png') {
-    return `data:${type};base64,${this.tagName}-${this.uid}-${this.currentSrc || this.drawnFrom || 'canvas'}`;
+    return `data:${type};base64,${this.currentSrc || this.drawnFrom || `${this.tagName}-${this.uid}-${this.pixelRevision || 0}`}`;
   }
 }
 
