@@ -25,7 +25,7 @@ export function prepared({ blocks = ocrBlocks(), translations = ['Hello'], outco
     translations: blocks.length ? translations : [], outcomes, sourceLanguage: 'ja', targetLanguage } };
 }
 
-export async function loadContentScript({ messages, settings: initial = {}, imageLoads, origin = 'http://page.test' } = {}) {
+export async function loadContentScript({ messages, settings: initial = {}, imageLoads, origin = 'http://page.test', hashDelayMs = 0 } = {}) {
   const document = new FakeDocument();
   const timers = createFakeTimers();
   const sent = [];
@@ -62,13 +62,27 @@ export async function loadContentScript({ messages, settings: initial = {}, imag
     }
     get src() { return this._src; }
   };
+  // Exercise delayed native work in race tests without assuming an OS will
+  // complete a WebCrypto operation within a fixed number of event-loop turns.
+  const crypto = hashDelayMs ? { subtle: { async digest(...args) {
+    await new Promise((resolve) => setTimeout(resolve, hashDelayMs));
+    return globalThis.crypto.subtle.digest(...args);
+  } } } : globalThis.crypto;
   const context = vm.createContext({
     chrome, document, window, Image, Audio: FakeAudio, MutationObserver: FakeMutationObserver,
     console: { log() {}, warn() {}, error() {} }, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
-    crypto: globalThis.crypto
+    crypto
   });
   vm.runInContext(source, context, { filename: 'content.js', importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER });
   const request = (action, payload = {}) => new Promise((resolve) => listener({ action, payload }, {}, resolve));
+  async function waitFor(predicate, description, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (await predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    } while (Date.now() < deadline);
+    throw new Error(`Timed out waiting for ${description}.`);
+  }
   const controlFor = (element) => {
     const anchor = ['IMG', 'CANVAS'].includes(element.tagName) ? element.parentElement : element;
     const iconContainer = anchor?.querySelector('.vt-lensmu-translate-icon-container');
@@ -79,7 +93,7 @@ export async function loadContentScript({ messages, settings: initial = {}, imag
       failureNotice: iconContainer.querySelector('.vt-lensmu-translation-notice') };
   };
   return {
-    document, timers, sent, request,
+    document, timers, sent, request, waitFor,
     observer: () => FakeMutationObserver.instances.at(-1),
     activate: (extra = {}) => { settings = { ...settings, ...extra }; return request('ACTIVATE', { settings }); },
     update: (extra = {}) => { settings = { ...settings, ...extra }; return request('SETTINGS_UPDATED', { settings }); },
@@ -92,13 +106,12 @@ export async function loadContentScript({ messages, settings: initial = {}, imag
       const img = document.createElement('img'); Object.assign(img, { src, naturalWidth, naturalHeight, complete });
       parent.appendChild(img); return img;
     },
-    async settle(rounds = 20) { for (let n = 0; n < rounds; n++) await new Promise((resolve) => setImmediate(resolve)); },
-    async idle(maxRounds = 2000) {
-      for (let n = 0; n < maxRounds; n++) {
-        await new Promise((resolve) => setImmediate(resolve));
-        if ((await request('GET_PAGE_STATE')).pendingCount === 0) return;
-      }
-      throw new Error('Image work did not settle.');
+    // Flush reactions to an already-resolved test response. Use waitFor for
+    // external work such as hashing, provider dispatch or image decoding.
+    flushMicrotasks: () => new Promise((resolve) => setImmediate(resolve)),
+    async idle() {
+      await new Promise((resolve) => setImmediate(resolve));
+      await waitFor(async () => (await request('GET_PAGE_STATE')).pendingCount === 0, 'image work to finish');
     }
   };
 }

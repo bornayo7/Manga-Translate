@@ -135,7 +135,8 @@ try {
     const before = requests.ocr;
     await page.locator('#first').locator('..').locator('.vt-lensmu-canvas').click({ position: { x: 150, y: 140 } });
     await save({ overlayFontFamily: 'serif', overlayOpacity: .4 });
-    await until(async () => (await state()).pendingCount === 0, 'cosmetic redraw');
+    await until(async () => await page.locator('#first').locator('..').locator('.vt-lensmu-canvas')
+      .evaluate((canvas) => canvas.getContext('2d').font.includes('Georgia')), 'cosmetic font redraw');
     assert.equal(await page.locator('#first').locator('..').locator('.vt-lensmu-canvas').evaluate((canvas) => canvas.style.opacity), '0');
     assert.equal(requests.ocr, before);
   });
@@ -160,6 +161,19 @@ try {
     await until(async () => await page.locator('#late-image').locator('..').locator('.vt-lensmu-canvas').count() === 0, 'currentSrc invalidation');
     await page.locator('#late-fixtures').evaluate((group) => group.remove());
     await until(async () => (await state()).imageCount === 4, 'late fixture removal');
+  });
+  await check('zero-painted output fails while genuine empty OCR remains neutral', async () => {
+    for (const [nextMode, language, expected] of [['tiny', 'es', 'failed'], ['empty', 'it', 'no-text']]) {
+      mode = nextMode; await save({ targetLanguage: language });
+      await until(async () => await count('.vt-lensmu-canvas') === 0, 'result invalidation');
+      const result = await sendPage('TRANSLATE_ALL_IMAGES');
+      assert.ok(result.outcomes.every((outcome) => outcome.status === expected), JSON.stringify(result));
+      assert.equal(await count('.vt-lensmu-canvas'), 0); assert.equal((await state()).translatedCount, 0);
+    }
+    mode = 'normal'; await save({ targetLanguage: 'en' });
+    await until(async () => await page.locator('[data-vt-state="idle"]').count() === 4, 'restored revision');
+    await sendPage('TRANSLATE_ALL_IMAGES');
+    assert.equal(await count('.vt-lensmu-canvas'), 4);
   });
   await check('cancel in-flight OCR, disable domain, restore host DOM and suppress stale paints', async () => {
     mode = 'hold'; await save({ targetLanguage: 'fr' });

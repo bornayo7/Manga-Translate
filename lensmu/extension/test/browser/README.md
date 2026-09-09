@@ -21,6 +21,7 @@ node test/browser/tesseract-acceptance.mjs
 - Contain placement, borders, DPR 2, target resize and cache reuse.
 - Source replacement, mixed DOM mutations, reparenting, late image loads, responsive `currentSrc`, and canvas pixel changes.
 - Cosmetic redraws preserve a hidden original; provider settings invalidate preparation.
+- Zero-painted output fails visibly; empty OCR stays a distinct neutral outcome.
 - In-flight cancellation, domain disabling, reload behavior and host style/structure restoration.
 - Actual MV3 worker replacement preserves live page state. A volatile worker marker proves replacement; Playwright keeps its Worker handle across restarts.
 - Closing the popup preserves page overlays. The reopened popup's sections, keyboard navigation and 400-pixel layout work without page exceptions.
