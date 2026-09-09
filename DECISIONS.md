@@ -1,5 +1,9 @@
 # DECISIONS.md
 
+## Accepted September 9 ownership decision
+
+[Image occurrence and durable settings ownership](docs/adr/0001-image-and-settings-ownership.md): separate per-target display lifetimes from reusable preparation; the background owns durable writes and trusted settings snapshots. The extension remains primary; thermo integrates into the existing main branch after acceptance. The user approved the complete plan.
+
 ## Decision 1: One canonical settings source
 
 The source of truth for preference defaults and schema versioning should be:

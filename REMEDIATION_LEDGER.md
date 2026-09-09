@@ -1,5 +1,7 @@
 # Remediation ledger — 2026-09-07
 
+> Historical audit ledger. The September 9 review reopened defects despite the older fixed labels. Current repair evidence and remaining qualification are maintained in [docs/IMPLEMENTATION_PROGRESS.md](docs/IMPLEMENTATION_PROGRESS.md); [CODEBASE_REVIEW.md](CODEBASE_REVIEW.md) preserves the reviewed source snapshot.
+
 Working tree: `main` @ `bbe553c` (clean on entry). The audited commit
 `b550dbcd0557fc5ae7b52112a1b2ba6fd040559d` does not exist locally or on
 `origin`; every finding was revalidated against the current checkout, not

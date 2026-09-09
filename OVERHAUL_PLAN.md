@@ -1,19 +1,19 @@
-# Proposed overhaul and branch integration
+# Approved overhaul and branch integration
 
-Prepared 2026-09-09 after the [complete codebase review](CODEBASE_REVIEW.md). Status: **review and plan complete; implementation not started**. Source baseline is `thermo` at `172c2d2`; the documentation checkpoint extends that branch without changing application behavior.
+Prepared 2026-09-09 after the [complete codebase review](CODEBASE_REVIEW.md). Status: **approved by the user on 2026-09-09; implementation and local acceptance complete; exact-candidate CI and integration recorded in PR #2**. Source baseline is `thermo` at `172c2d2`; the documentation checkpoint extends that branch without changing application behavior.
 
 ## Outcome and proposed scope
 
 Make lensmu reliable at its main job: translate each requested webpage image, display a truthful result, and clean up correctly when the page or user changes intent. Build simpler modules around that behavior, then give the popup and website a coherent reading-focused interface.
 
-Proposed defaults awaiting the user's review:
+Accepted defaults from the user's full-plan authorization:
 
 1. Keep the extension as the product and the website as a clearly limited local demo and installation guide. Preserve the extension/backend/website split.
 2. Continue on the existing `thermo` branch. Integrate into the actual default branch, **`main`**, after the acceptance gates pass. There is no `master` branch; renaming the default branch is a separate decision.
 3. Keep supported OCR/translation choices, local-only credentials and opt-in fallback. Validate advertised options against actual dependencies/providers before release.
-4. Teach the architectural changes and safe branch integration as the work proceeds. A standalone teaching mission remains pending the user's stated learning goal; no learning achievements are inferred from this review.
+4. Teach the architectural changes and safe branch integration as the work proceeds. Architectural ownership and safe branch integration are the initial teaching focus; no learning achievements are inferred from implementation.
 
-The requested grill-with-docs interview has three open frontier decisions: destination branch name, extension-versus-website scope, and teaching focus. Those questions have already been presented. Recommendations here are proposals, not recorded product decisions. Create an ADR only when an agreed choice rules out meaningful alternatives.
+The user approved the complete plan after reviewing the branch, product-scope and teaching recommendations. The accepted ownership choice is recorded in `docs/adr/0001-image-and-settings-ownership.md`. Routine source changes, verification, checkpoints and main integration are authorized.
 
 ## Design rules
 

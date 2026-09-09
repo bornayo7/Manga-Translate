@@ -1,5 +1,7 @@
 # Codebase review — 2026-09-09
 
+> Historical reviewed snapshot. The approved overhaul and all 27 current dispositions are documented in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md). This original review is retained as evidence of the defects before repair.
+
 **Verdict: request changes before merging `thermo`.** The current checks pass, but deterministic probes reproduce lost settings, incorrect image ownership, stale overlays, and false success. These require behavioral repairs before the larger structural and visual overhaul.
 
 Reviewed source: `thermo` at `172c2d2c9fd297304956bb634bab1877a377db47`. Comparison: `main` at `bbe553c32ef9ecd46f089a62f53a0b3eb3b75460`. All source references below refer to that reviewed snapshot, before implementation. The review itself changes documentation only.

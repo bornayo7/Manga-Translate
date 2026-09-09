@@ -1,63 +1,40 @@
-# PIPELINES.md
+# Pipelines
 
-## Extension OCR -> translation -> overlay pipeline
+## Image translation
 
-1. User triggers translation from the popup
-2. Popup sends a message to `background.js`
-3. `background.js` coordinates the request and current settings
-4. `content.js` scans page images and extracts usable image data
-5. OCR runs through one of:
-   - backend OCR
-   - Tesseract.js
-   - Cloud Vision
-6. OCR results are grouped into text blocks
-7. grouped text is sent to the selected translation provider
-8. translated text is returned
-9. `overlay.js` renders translated blocks back onto the image
+1. Popup or keyboard intent reaches the background. The worker queries actual page state rather than restoring a stale tab snapshot.
+2. The page controller discovers eligible targets. Each occurrence has an independent `ImageSession`.
+3. Image preparation reads pixels, fingerprints content and acquires shared work by content/settings identity. A click promotes existing prefetch intent.
+4. `PREPARE_IMAGE` reaches the background with an opaque preparation revision and a request ID scoped to the sending document.
+5. The background loads one trusted settings snapshot, calls normalized OCR, groups regions and translates text. It checks the preparation revision before accepting each stage.
+6. Shared outcome classification preserves failed/skipped regions and rejects known-language source echoes. A concrete display plan determines graphemes and placements.
+7. The current image session alone can commit its overlay. Painted-region counts decide full/partial/failed display; unpaintable regions keep original pixels.
+8. Source replacement, settings changes, deactivation or target removal retire obsolete authority. Shared work survives while another current consumer needs it; an unstoppable worker holds capacity until actual completion.
 
-## Debugging rule for this pipeline
+Trace source identity, OCR result, grouped region indices, provider outcomes, display placements and current session acceptance in order. Use controlled fixtures rather than logging provider keys, image payloads or private source text.
 
-Always trace:
+## Local OCR
 
-OCR raw output
--> grouped blocks
--> translation request payload
--> translation response payload
--> final render payload
+HTTP schema and compressed-byte validation → bounded runtime admission → header/pixel/full-decode validation → lazy model/cache → serialized engine inference → normalized aligned outcome → HTTP response.
 
-Do not assume the bug is in rendering just because the overlay is wrong.
+Paddle receives BGR pixels and has document geometry transforms disabled. Manga accepts Japanese crops and returns recognized/empty/outside-image/failed statuses. Full attempted inference failure is an error. Partial fallback recognition is labeled by clients.
 
-## Backend OCR pipeline
+## Bundled OCR
 
-image upload
--> FastAPI route in `server.py`
--> OCR engine wrapper
--> normalized OCR response
--> return bounding boxes and detected text
+The worker creates or reuses one offscreen document → the document serializes Tesseract recognition → its idle owner terminates the model and notifies the worker → the worker rechecks idle state and closes the document. This survives worker recreation without depending on an old in-memory idle timer.
 
-## Website pipeline
+## Settings
 
-The website demo is a simpler flow than the extension:
+Popup draft patch → prompt message dispatch → background serialized read/merge/write → durable acknowledgment and opaque revisions → ordered sanitized page update.
 
-upload image
--> website OCR path
--> translation path
--> client-side redraw
+A failed read prevents a write. A failed acknowledgment leaves the relevant UI fields unsaved. Cosmetic revisions can redraw; OCR/translation changes and actual credential rotations invalidate preparation. Canonical definitions and strict website validation are in `lensmu/extension/shared/preferences.js`. Local migration remains deliberately coercive.
 
-This surface should either:
-- match extension capability, or
-- be clearly labeled as a limited demo
+Website preference metadata accepts only safe shared fields. Extension API keys, auth tokens and local backend/provider endpoints are excluded. Account preference sync from the extension remains explicitly deferred; the website API is not evidence that extension sync is live.
 
-## Settings sync pipeline
+## Website demo
 
-Desired model:
+Bounded local input → backend OCR → MyMemory translation → shared display plan → rendered Blob → current session-owned result URL. The session rejects stale progress/results and revokes URLs on replacement, cancellation or unmount. A transcript exposes recognized text, translated text and partial outcomes. The sample/installation routes keep the extension primary.
 
-extension settings
--> split into synced vs local-only
--> sync only safe preferences to website/Auth0
--> merge synced preferences with extension local defaults
+## Validation
 
-Never sync:
-- API keys
-- secrets
-- backend URLs unless explicitly intended
+See [implementation evidence](docs/IMPLEMENTATION_PROGRESS.md) and the slice reports for deterministic tests, real browser fixtures and the OCR profile matrix. Authenticated provider calls, real account flows and Docker require their own evidence; passing local fixtures cannot substitute for those routes.

@@ -1,5 +1,7 @@
 # AUDIT.md — VisionTranslate deep repair
 
+> Historical audit ledger. The September 9 review reopened defects despite the older fixed labels. Current repair evidence and remaining qualification are maintained in [docs/IMPLEMENTATION_PROGRESS.md](docs/IMPLEMENTATION_PROGRESS.md); [CODEBASE_REVIEW.md](CODEBASE_REVIEW.md) preserves the reviewed source snapshot.
+
 Branch: `audit/deep-repair` (from `main` @ `48955f8` "Overhaul").
 Status legend for findings: **open** / **fixed** / **deferred** / **won't-fix**.
 

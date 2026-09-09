@@ -1,79 +1,51 @@
-# REPO_MAP.md
+# Repository map
 
-## Top-level structure
+The extension is the primary product. The website is an installation/marketing surface and explicitly limited local translation demo. This map describes the approved September 9 overhaul; verification status is in [implementation evidence](docs/IMPLEMENTATION_PROGRESS.md).
 
-```text
-Manga-Translate/
-  README.md
-  lensmu/
-    backend/
-    extension/
-    website/
-```
+## Extension
 
-## Product surfaces
+| Start here | Ownership |
+|---|---|
+| `lensmu/extension/content.js` | Classic content-script entry; loads page controller and registers messages |
+| `lensmu/extension/page/controller.js` | Page activation, discovery reconciliation, image registry and batch progress |
+| `lensmu/extension/page/image-session.js` | One image occurrence's source/settings revision, intent and disposal |
+| `lensmu/extension/page/image-preparation.js` | Pixel reading, content fingerprint, shared preparation subscription and transport |
+| `lensmu/extension/page/discovery.js` | Eligible image/canvas/background targets and complete mutation observation |
+| `lensmu/extension/page/overlay-session.js` | Per-target controls, reversible mounting, display and outcome |
+| `lensmu/extension/page/read-aloud.js` | One page playback lifetime |
+| `lensmu/extension/background.js` | Synchronous MV3 composition and trusted message routing |
+| `lensmu/extension/background/` | Trusted preparation snapshot, document-scoped requests, actual page state and offscreen lifetime |
+| `lensmu/extension/overlay.js`, `lensmu/extension/render/` | Rendering, source-space grouping and host geometry |
+| `lensmu/extension/shared/` | Canonical preferences, strict response contracts, display plans, bounded cache/queue and provider helpers |
+| `lensmu/extension/utils/storage.js` | Serialized authoritative settings/domain storage and migration |
+| `lensmu/extension/ocr/`, `lensmu/extension/translate/`, `lensmu/extension/tts/` | OCR, translation and read-aloud provider boundaries |
+| `lensmu/extension/offscreen/` | Tesseract document, recognition queue and idle cleanup |
+| `lensmu/extension/src/popup/` | UI composition plus settings, page, account and speech-preview sessions |
+| `lensmu/extension/test/` | Public behavior, provider and lifecycle regressions |
 
-### 1. Extension
-Primary product surface. This is where the real OCR -> translation -> overlay experience lives.
+## Backend
 
-Important files:
-- `lensmu/extension/manifest.json`
-- `lensmu/extension/background.js`
-- `lensmu/extension/content.js`
-- `lensmu/extension/overlay.js`
-- `lensmu/extension/utils/storage.js`
+- `lensmu/backend/server.py`: request/response schema, middleware, HTTP mapping and `create_app(runtime)` seam.
+- `lensmu/backend/ocr_runtime.py`: bounded workers, model loading/cache, actual completion, cancellation and health snapshots.
+- `lensmu/backend/image_decoder.py`: compressed/decoded input validation and owned RGB image.
+- `lensmu/backend/ocr_engines/`: Paddle version/BGR/geometry adapter and Manga aligned region outcomes.
+- `lensmu/backend/requirements*.txt`, `lensmu/backend/constraints/`: shared pinned core/development/OCR2/OCR3 profiles.
+- `lensmu/backend/test_*.py`: deterministic contracts plus opt-in real OCR matrix.
 
-Subsystems:
-- `lensmu/extension/ocr/` for OCR providers
-- `lensmu/extension/translate/` for translation providers
-- `lensmu/extension/src/popup/` for popup UI
+## Website
 
-### 2. Backend
-Provides OCR endpoints for local engines.
+- `lensmu/website/app/`: landing, translation, installation, about and contact pages, plus the authenticated preferences API at `app/api/preferences/route.ts`. There is no separate preferences page.
+- `lensmu/website/components/sections/TranslatorSection.tsx`: UI that consumes the cancellable translation session.
+- `lensmu/website/lib/translation-session.js`: current request, progress acceptance and result URL ownership.
+- `lensmu/website/lib/`: `image-input.ts`, `demo-ocr.ts`, `demo-translation.ts` and `image-renderer.ts` are narrow stages composed by `translator.ts`.
+- `lensmu/website/lib/preferences-schema.ts`, `lensmu/website/lib/preferences-store.ts`: canonical shared validation and safe preference metadata; no extension keys.
+- `lensmu/website/public/sample-panel*.svg`: original authored comparison panel assets.
 
-Important files:
-- `lensmu/backend/server.py`
-- `lensmu/backend/security.py`
-- `lensmu/backend/ocr_engines/`
+## Persistent project context
 
-### 3. Website
-Marketing/demo surface and website preference sync.
+- [Review](CODEBASE_REVIEW.md) and `docs/reviews/2026-09-09/`: historical full-source snapshot and reproduced findings.
+- [Plan](OVERHAUL_PLAN.md), [current state](TASK_STATE.md), [implementation evidence](docs/IMPLEMENTATION_PROGRESS.md): accepted scope and actual progress.
+- [Decision](docs/adr/0001-image-and-settings-ownership.md), [pipelines](PIPELINES.md), [glossary](CONTEXT.md): ownership and vocabulary.
+- [Teaching mission](MISSION.md), `lessons/`, `reference/`, `assets/`: small maintenance lessons; learning achievements are not inferred.
 
-Important files:
-- `lensmu/website/app/page.tsx`
-- `lensmu/website/lib/preferences-schema.ts`
-- `lensmu/website/lib/preferences-store.ts`
-
-## Main extension data flow
-
-Popup settings
--> `background.js`
--> `content.js`
--> OCR provider
--> translation provider
--> `overlay.js`
-
-## Known architectural pressure points
-
-- `background.js`, `content.js`, and `overlay.js` are large and high-responsibility
-- settings/defaults are duplicated or drifting
-- website and extension behavior can diverge
-- storage handling looks inconsistent between direct key storage and `SETTINGS_KEY`
-
-## Recommended canonical settings ownership
-
-Create:
-- `lensmu/extension/shared/preferences.js`
-
-This file should export:
-- `PREFERENCE_SCHEMA_VERSION`
-- `DEFAULT_EXTENSION_SETTINGS`
-- `DEFAULT_SYNCED_PREFERENCES`
-- `LOCAL_ONLY_SETTING_KEYS`
-- `splitSettingsForSync()`
-- `mergeWithDefaults()`
-
-Then:
-- `lensmu/website/lib/preferences-schema.ts` imports from it
-- `lensmu/website/lib/preferences-store.ts` imports from it
-- `lensmu/extension/utils/storage.js` imports from it
+Do not scan vendor `extension/lib/`, dependency trees, virtual environments or generated build output for application behavior. Review them only when packaging/build tooling is in scope.

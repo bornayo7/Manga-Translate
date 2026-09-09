@@ -1,16 +1,20 @@
 # TASK_STATE.md
 
-## Current goal
+## Current work
 
-Review and plan a staged overhaul on the existing `thermo` branch before implementation. The 2026-09-09 complete review reproduced correctness defects despite passing baseline checks. Current findings live in [CODEBASE_REVIEW.md](CODEBASE_REVIEW.md); proposed changes, acceptance gates and branch integration live in [OVERHAUL_PLAN.md](OVERHAUL_PLAN.md).
+The approved overhaul has been implemented on `thermo`. The existing default branch is `main`; no `master` branch exists. Preserve the original thermo history and branch names. [PR #2](https://github.com/bornayo7/Manga-Translate/pull/2) records the current integration and exact checks.
 
-## Current checkpoint — 2026-09-09
+## Verified implementation — 2026-09-09
 
-- Reviewed source: `thermo` at `172c2d2`, eight commits ahead of `main` at `bbe553c`. No `master` branch exists; `main` is the GitHub default. No merge or conflict resolution has been performed.
-- Baseline: extension 173/173 tests and build; website 5/5 tests, lint, typecheck and build; backend 53 passed, 1 live-model test skipped. No `thermo` CI run existed; current CI runs on main pushes and pull requests.
-- Full reads: 150 tracked first-party text files, 27,811 lines. Detailed audit reports and coverage are under `docs/reviews/2026-09-09/`.
-- First repairs: durable settings acknowledgment/read failure handling, per-target image ownership/revisions, truthful rendered outcomes and provider completion validation. Existing shared preferences and architecture split remain the foundation.
-- Review/plan documentation only. Source implementation awaits the user's review of the concrete plan and open scope/branch decisions. Real installed-extension, OCR-model, provider and authenticated flows remain unverified.
+- All 27 findings from the 150-file review have implemented repairs and regression evidence. [Acceptance report](docs/ACCEPTANCE.md) distinguishes fixed behavior from unverified external routes.
+- Pushed milestones: `13cf85d` storage/provider contracts, `b281a90` OCR runtime/profiles, `9a67d3e` region truth, `6a87bfd` image/MV3 ownership, `e1c0af2` UI sessions/design, `f499312` browser/pixel admission, `b4a6f05` provider migration/CI configuration, `165a19b` lifecycle timing and expanded browser coverage, `64a3d3b` verified installation instructions.
+- Local checks: 229 extension tests/build; 16 website tests/lint/typecheck/build; fresh backend 76 tests with 8 opt-in skips. Each OCR profile passes 8 real-model cases. Chromium extension 9 groups; website 23 groups; real bundled Tesseract lifecycle and one live MyMemory export verified.
+- CI has four jobs, including installed-extension browser acceptance. Node 20 timing assumptions discovered remotely were reproduced using delayed real WebCrypto and repaired in the public test harness. [Implementation progress](docs/IMPLEMENTATION_PROGRESS.md) and the PR retain the evidence.
+- Original main `bbe553c` and thermo source `172c2d2` are preserved in history. Integration requires clean exact status/diff, remote ancestry and passing candidate CI, with a normal fast-forward/push and verification of the resulting remote main.
+
+## Remaining qualification
+
+Authenticated OpenAI/Claude/Gemini/custom/Google Vision/ElevenLabs and Auth0 flows; Docker execution; Linux/macOS native OCR/GPU; additional language/host-layout/assistive-technology fixtures. Official docs support the offered model catalog; that does not prove live account access. Extension preference sync, Firefox and wrapper-free rendering are deliberately deferred. No source-edit or routine verified checkpoint confirmation remains outstanding.
 
 ## Historical implementation checkpoints
 
@@ -95,7 +99,7 @@ backend 45 → 46. All suites green.
 
 ## Success criteria
 
-1. Keep extension tests/build, website lint/typecheck/build, and backend tests green in CI.
+1. Keep extension tests/build, website lint/typecheck/tests/build, backend tests and installed-extension browser acceptance green in CI.
 2. Configure Auth0 audience/scopes before enabling preference sync.
 3. Add a Firefox-specific manifest and real-browser coverage before restoring Firefox claims.
-4. Run real PaddleOCR/MangaOCR and provider smoke tests with local credentials.
+4. Extend the qualified real OCR matrices to more platforms and languages; qualify authenticated providers using explicitly configured local credentials.

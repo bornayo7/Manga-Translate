@@ -1,0 +1,256 @@
+{
+  "zoomEquivalent": [
+    {
+      "route": "/",
+      "cssViewport": "640x450",
+      "physicalViewport": "1280x900",
+      "horizontalOverflow": false
+    },
+    {
+      "route": "/translate",
+      "cssViewport": "640x450",
+      "physicalViewport": "1280x900",
+      "horizontalOverflow": false
+    },
+    {
+      "route": "/install",
+      "cssViewport": "640x450",
+      "physicalViewport": "1280x900",
+      "horizontalOverflow": false
+    },
+    {
+      "route": "/about",
+      "cssViewport": "640x450",
+      "physicalViewport": "1280x900",
+      "horizontalOverflow": false
+    },
+    {
+      "route": "/contact",
+      "cssViewport": "640x450",
+      "physicalViewport": "1280x900",
+      "horizontalOverflow": false
+    }
+  ],
+  "reducedMotion": [
+    {
+      "route": "/",
+      "scrollBehavior": "auto",
+      "activeAnimationsOrTransitions": 0
+    },
+    {
+      "route": "/translate",
+      "scrollBehavior": "auto",
+      "activeAnimationsOrTransitions": 0
+    },
+    {
+      "route": "/install",
+      "scrollBehavior": "auto",
+      "activeAnimationsOrTransitions": 0
+    },
+    {
+      "route": "/about",
+      "scrollBehavior": "auto",
+      "activeAnimationsOrTransitions": 0
+    },
+    {
+      "route": "/contact",
+      "scrollBehavior": "auto",
+      "activeAnimationsOrTransitions": 0
+    }
+  ],
+  "contrast": [
+    {
+      "surface": "website",
+      "theme": "light",
+      "name": "heading",
+      "foreground": "rgb(32, 48, 74)",
+      "background": "rgb(241, 244, 250)",
+      "ratio": 12.04
+    },
+    {
+      "surface": "website",
+      "theme": "light",
+      "name": "body text",
+      "foreground": "rgb(82, 96, 121)",
+      "background": "rgb(241, 244, 250)",
+      "ratio": 5.76
+    },
+    {
+      "surface": "website",
+      "theme": "light",
+      "name": "primary action",
+      "foreground": "rgb(255, 255, 255)",
+      "background": "rgb(49, 87, 200)",
+      "ratio": 6.31
+    },
+    {
+      "surface": "website",
+      "theme": "light",
+      "name": "text link",
+      "foreground": "rgb(49, 87, 200)",
+      "background": "rgb(241, 244, 250)",
+      "ratio": 5.73
+    },
+    {
+      "surface": "website",
+      "theme": "light",
+      "name": "confirmation token",
+      "foreground": "#176f67",
+      "background": "#fff",
+      "ratio": 5.99
+    },
+    {
+      "surface": "website",
+      "theme": "light",
+      "name": "error token",
+      "foreground": "#b33a43",
+      "background": "#fff",
+      "ratio": 5.83
+    },
+    {
+      "surface": "website",
+      "theme": "dark",
+      "name": "heading",
+      "foreground": "rgb(241, 244, 250)",
+      "background": "rgb(22, 34, 55)",
+      "ratio": 14.46
+    },
+    {
+      "surface": "website",
+      "theme": "dark",
+      "name": "body text",
+      "foreground": "rgb(189, 202, 222)",
+      "background": "rgb(22, 34, 55)",
+      "ratio": 9.61
+    },
+    {
+      "surface": "website",
+      "theme": "dark",
+      "name": "primary action",
+      "foreground": "rgb(32, 48, 74)",
+      "background": "rgb(173, 190, 255)",
+      "ratio": 7.32
+    },
+    {
+      "surface": "website",
+      "theme": "dark",
+      "name": "text link",
+      "foreground": "rgb(173, 190, 255)",
+      "background": "rgb(22, 34, 55)",
+      "ratio": 8.79
+    },
+    {
+      "surface": "website",
+      "theme": "dark",
+      "name": "confirmation token",
+      "foreground": "#8ad9cb",
+      "background": "#20304a",
+      "ratio": 8.13
+    },
+    {
+      "surface": "website",
+      "theme": "dark",
+      "name": "error token",
+      "foreground": "#ffb4bb",
+      "background": "#20304a",
+      "ratio": 7.89
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "light",
+      "name": "body text",
+      "foreground": "#20304a",
+      "background": "#fff",
+      "ratio": 13.27
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "light",
+      "name": "secondary text",
+      "foreground": "#4d5c72",
+      "background": "#fff",
+      "ratio": 6.8
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "light",
+      "name": "muted text",
+      "foreground": "#5c6b80",
+      "background": "#fff",
+      "ratio": 5.43
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "light",
+      "name": "primary action",
+      "foreground": "#fff",
+      "background": "#3157c8",
+      "ratio": 6.31
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "light",
+      "name": "confirmation token",
+      "foreground": "#176f67",
+      "background": "#fff",
+      "ratio": 5.99
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "light",
+      "name": "error token",
+      "foreground": "#b33a43",
+      "background": "#fff",
+      "ratio": 5.83
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "dark",
+      "name": "body text",
+      "foreground": "#f1f4fa",
+      "background": "#20304a",
+      "ratio": 12.04
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "dark",
+      "name": "secondary text",
+      "foreground": "#ccd6e7",
+      "background": "#20304a",
+      "ratio": 9.06
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "dark",
+      "name": "muted text",
+      "foreground": "#b0bfd5",
+      "background": "#20304a",
+      "ratio": 7.11
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "dark",
+      "name": "primary action",
+      "foreground": "#20304a",
+      "background": "#adbeff",
+      "ratio": 7.32
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "dark",
+      "name": "confirmation token",
+      "foreground": "#8ad9cb",
+      "background": "#20304a",
+      "ratio": 8.13
+    },
+    {
+      "surface": "popup stylesheet",
+      "theme": "dark",
+      "name": "error token",
+      "foreground": "#ffb4bb",
+      "background": "#20304a",
+      "ratio": 7.89
+    }
+  ],
+  "pageErrors": []
+}

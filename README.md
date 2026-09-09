@@ -1,387 +1,157 @@
-```
- __      __ _       _            _____                        _         _
- \ \    / /(_)     (_)          |_   _|                      | |       | |
-  \ \  / /  _  ___  _   ___   _ | |  _ __  __ _  _ __   ___ | |  __ _ | |_  ___
-   \ \/ /  | |/ __|| | / _ \ | \| | | '__|/ _` || '_ \ / __|| | / _` || __|/ _ \
-    \  /   | |\__ \| || (_) || .  | | |  | (_| || | | |\__ \| || (_| || |_|  __/
-     \/    |_||___/|_| \___/ |_|\_| |_|   \__,_||_| |_||___/|_| \__,_| \__|\___|
+# lensmu / VisionTranslate
 
-                    VisionTranslate -- see it, read it, understand it
-```
+A Chrome Manifest V3 extension that reads text in webpage images and draws translated text over each image. The repository is named Manga-Translate; VisionTranslate is the project name and lensmu is the product.
 
-# VisionTranslate
+The extension is the primary product. The Next.js website introduces it, explains installation, and offers a limited demo that uses your local OCR backend. The demo does not accept extension provider credentials.
 
-> **See it. Read it. Understand it.**
+## Start here
 
-A browser extension built at **HackSMU VII** that translates text inside images on any web page — manga, street signs, menus, screenshots — in real time, without leaving your browser.
+- [Install the extension](#browser-extension)
+- [Run local OCR](#local-ocr-backend)
+- [Run the website](#website)
+- [Review findings](CODEBASE_REVIEW.md), [approved overhaul plan](OVERHAUL_PLAN.md), [implementation evidence](docs/IMPLEMENTATION_PROGRESS.md)
 
-VisionTranslate uses OCR (Optical Character Recognition) to extract text from images, sends that text to a translation service, and overlays the translated text right on top of the original image — matching position, size, and background color.
+## Requirements
 
-**Example use cases:**
+| Component | Tested setup |
+|---|---|
+| Extension and website | Node.js 20.19 or later; `npm ci` |
+| Backend | Python 3.12 with a selected pinned dependency profile |
+| Browser | Chromium with Manifest V3 offscreen documents; manifest minimum Chrome 109 |
 
-- Reading Japanese manga that hasn't been officially translated
-- Understanding foreign-language street signs in Google Street View
-- Browsing a restaurant menu photographed in another language
-- Reading screenshots or infographics posted in a language you don't speak
+The minimum browser version is an API requirement, not a claim that every Chromium release has been tested. Firefox is not a supported release target. Exact qualification and remaining external checks are recorded in the implementation evidence.
 
+## Browser extension
 
-## Tech Stack
-
-| Layer | Technologies |
-|-------|-------------|
-| **Extension** | JavaScript, React, Vite, Tesseract.js, Canvas |
-| **Backend** | Python, FastAPI, PaddleOCR, MangaOCR |
-| **OCR Engines** | PaddleOCR (80+ languages), MangaOCR (Japanese), Tesseract.js (in-browser), Google Cloud Vision |
-| **Translation** | Gemini, OpenAI, Claude, custom OpenAI-compatible APIs, MyMemory |
-| **Website** | Next.js 16, React 18, TypeScript, Auth0 |
-
-
-## How It Works (Architecture)
-
-```
-+--------------------------------------------------+
-|                    YOUR BROWSER                   |
-|                                                   |
-|   +--------------------+   +------------------+   |
-|   |   Extension Popup  |   |   Content Script |   |
-|   |   (React UI)       |   |   (overlay.js)   |   |
-|   |                    |   |                  |   |
-|   |  - Settings panel  |   |  - Scans <img>  |   |
-|   |  - Engine picker   |   |  - Draws overlay |   |
-|   |  - Translate btn   |   |  - Shows results |   |
-|   +--------+-----------+   +--------+---------+   |
-|            |                        |              |
-+------------|------------------------|--------------|
-             |  chrome.runtime API    |  HTTP POST   |
-             +----------+-------------+              |
-                        |                            |
-                        v                            |
-            +-----------+-----------+                |
-            |   Background Script   |                |
-            |   (Service Worker)    | <--------------+
-            |                       |
-            |   - Routes messages   |
-            |   - Manages state     |
-            +-----------+-----------+
-                        |
-                        | HTTP requests
-                        v
-            +-----------+-----------+
-            |    Python Backend     |
-            |    (FastAPI server)   |
-            |                       |
-            |  /ocr/paddle:         |
-            |    - PaddleOCR        |
-            |  /ocr/manga:          |
-            |    - MangaOCR         |
-            +-----------------------+
-               runs on localhost:8000
-```
-
-**Data flow when you click "Translate This Page":**
-
-1. The popup sends a message to the background script: "translate this tab."
-2. The background script tells the content script (injected in the page) to start scanning.
-3. The content script finds all `<img>` elements, extracts each image as a base64-encoded string, and sends it to the OCR engine.
-4. The OCR engine (PaddleOCR, MangaOCR, Tesseract.js, or Cloud Vision) returns bounding boxes + recognized text.
-5. The content script sends recognized text to the background worker, which calls Gemini, OpenAI, Claude, a custom API, or MyMemory. Provider credentials never enter the content script.
-6. The translation module returns the translated text.
-7. The content script renders translated text into a dedicated canvas layered over each image, keeping the overlay isolated from the host page's layout.
-
-**Note on Tesseract.js:** The extension also bundles Tesseract.js, which runs OCR entirely in the browser (no backend needed). This is useful for quick translations but is generally less accurate than PaddleOCR for non-Latin scripts.
-
-
-## Prerequisites
-
-| Requirement       | Minimum Version | How to Check          | Install Guide                          |
-|-------------------|-----------------|-----------------------|----------------------------------------|
-| Python            | 3.10 to 3.12    | `python3 --version`   | https://www.python.org/downloads/      |
-| pip               | 21.0+           | `pip3 --version`      | Comes with Python                      |
-| Node.js           | 20.19+          | `node --version`      | https://nodejs.org/                    |
-| npm               | 9.0+            | `npm --version`       | Comes with Node.js                     |
-| Chromium browser  | Chrome 109+     | Check browser version | https://www.google.com/chrome/         |
-| Git               | Any             | `git --version`       | https://git-scm.com/                   |
-
-**Operating system notes:**
-
-- **macOS:** Install Python via Homebrew (`brew install python3`) or from python.org. Node.js via Homebrew (`brew install node`) or nvm.
-- **Linux (Ubuntu/Debian):** `sudo apt update && sudo apt install python3 python3-pip python3-venv nodejs npm`
-- **Windows:** Download installers from python.org and nodejs.org. Use PowerShell or WSL for the terminal commands below.
-
-
-## Setup: Python Backend
-
-The backend is a FastAPI server that provides OCR endpoints.
-
-### Step 1: Navigate to the backend directory
-
-```bash
-cd lensmu/backend
-```
-
-### Step 2: Create a Python virtual environment
-
-```bash
-# Create the virtual environment (only need to do this once)
-python3 -m venv venv
-
-# Activate it
-# On macOS/Linux:
-source venv/bin/activate
-
-# On Windows (PowerShell):
-.\venv\Scripts\Activate.ps1
-```
-
-You should see `(venv)` appear at the beginning of your terminal prompt.
-
-### Step 3: Install Python dependencies
-
-```bash
-# Core server dependencies (FastAPI, uvicorn, Pillow, numpy)
-pip install -r requirements.txt
-```
-
-**Optional: Install OCR engines**
-
-PaddlePaddle and manga-ocr require **Python 3.10–3.12** (the server itself uses 3.10+ syntax). If you're on Python 3.13+, skip this step and use Tesseract.js (runs in the browser, no server needed) or Google Cloud Vision from the extension settings.
-
-```bash
-# macOS (Apple Silicon):
-pip install paddlepaddle==2.6.2 -f https://www.paddlepaddle.org.cn/whl/mac/cpu/paddlepaddle.html
-
-# Linux (CPU only):
-pip install paddlepaddle==2.6.2
-
-# Windows (CPU only):
-pip install paddlepaddle==2.6.2
-
-# Then install PaddleOCR and MangaOCR:
-pip install "paddleocr>=2.7.0,<3.0" "manga-ocr>=0.1.8"
-```
-
-### Step 4: Start the backend server
-
-```bash
-python server.py
-```
-
-You should see: `INFO: Uvicorn running on http://127.0.0.1:8000`
-
-### Step 5: Verify the server is running
-
-```bash
-curl http://localhost:8000/health
-```
-
-**Docker alternative:**
-
-```bash
-cd lensmu/backend
-docker build -t visiontranslate-backend .
-docker run -p 8000:8000 visiontranslate-backend
-
-# With OCR engines:
-docker build --build-arg INSTALL_OCR=true -t visiontranslate-backend .
-```
-
-
-## Setup: Browser Extension
-
-### Step 1: Install Node.js dependencies
-
-```bash
+```sh
 cd lensmu/extension
 npm ci
-```
-
-### Step 2: Build the extension
-
-```bash
 npm run build
 ```
 
-### Step 3: Load the extension in your browser
+1. Open `chrome://extensions` and enable Developer mode.
+2. Choose **Load unpacked** and select `lensmu/extension` (the directory containing `manifest.json`).
+3. Pin lensmu from the browser's extensions menu.
+4. Open a normal webpage containing images and choose the source/target languages in the popup.
+5. Activate the page controls and use an image's translation button, or translate all discovered images.
 
-**Chrome / Chromium / Brave / Edge:**
+Switching the page off removes its overlays and remembers that choice for the site. `Alt+Shift+V` toggles the current page. Browser internal pages cannot run content scripts.
 
-1. Open Chrome and go to `chrome://extensions`
-2. Toggle **Developer mode** ON (top-right corner)
-3. Click **Load unpacked**
-4. Navigate to and select the `lensmu/extension/` folder (the one containing `manifest.json`)
-5. Pin VisionTranslate from the puzzle piece menu for easy access
+OCR choices are bundled Tesseract, local PaddleOCR, local Japanese MangaOCR, Google Cloud Vision and a custom OCR endpoint. Translation choices are MyMemory, OpenAI, Claude, Gemini and a custom OpenAI-compatible endpoint. Paid providers require a key; MyMemory has service quotas. Public-provider fallback is opt-in. Provider failures and regions that cannot be displayed remain visible as failures or partial results.
 
-Firefox is not currently a supported release target. The active build relies on
-Chrome Manifest V3 offscreen documents; add a Firefox-specific manifest and
-browser test job before advertising Firefox support.
+Provider keys live in trusted extension storage and are excluded from page messages, website settings and account metadata. Tesseract downloads language data on first use and runs in an extension offscreen document. Local OCR sends image data to your configured backend; translation sends recognized text to the selected provider.
 
+## Local OCR backend
 
-## How to Use
+Use Python 3.12 in an isolated environment. Core server tests do not install the OCR models. Choose one OCR profile when recognition is needed; do not combine profiles in the same environment.
 
-1. **Start the backend** — only for PaddleOCR or MangaOCR. Tesseract.js and Google Cloud Vision need no server.
-2. **Click the VisionTranslate icon** in your browser toolbar.
-3. **Configure your settings:**
-   - **Engines tab → OCR engine:** PaddleOCR (best for most languages), MangaOCR (best for Japanese manga), Tesseract.js (no backend needed), Google Cloud Vision, or a custom OCR endpoint
-   - **Engines tab → Translation provider:** OpenAI, Claude, Gemini, a custom OpenAI-compatible API (each needs its key), or MyMemory (free, no key, small daily quota)
-   - **Home tab → Languages:** the language the images are in (or auto-detect) and the language to translate INTO
-4. **Open a page with images.** With "Activate automatically" on (the default), every image large enough to hold text gets a small **文A** button in its corner. Nothing is translated until you ask.
-5. **Click a 文A button** to translate that image, or **Translate All** next to any button / **Translate This Page** in the popup to do them all.
-6. **Click a translated image** to flip between the translation and the original.
-7. **Switch the page toggle off** in the popup (or press **Alt+Shift+V**) to remove every overlay and keep the extension off for that site until you switch it back on.
-
-### Tips for Best Results
-
-- Larger images produce better OCR results than tiny thumbnails
-- Clean, high-contrast text (black text on white background) works best
-- MangaOCR is specifically trained on Japanese manga and outperforms PaddleOCR for that use case
-- Tesseract.js is convenient (no backend required) but less accurate for CJK text
-
-
-## Configuration Options
-
-| Option                   | Values                                                          | Default               | Description                                                                 |
-|--------------------------|-----------------------------------------------------------------|-----------------------|-----------------------------------------------------------------------------|
-| OCR engine               | PaddleOCR, MangaOCR, Tesseract.js, Google Cloud Vision, Custom  | Tesseract.js          | Which OCR engine extracts the text                                          |
-| Translation provider     | OpenAI, Claude, Gemini, custom OpenAI-compatible API, MyMemory  | MyMemory              | Which translation service to use                                            |
-| Model                    | Per provider (see the picker)                                   | Provider default      | LLM model for OpenAI, Claude and Gemini                                     |
-| Source language          | auto, en, ja, zh-CN, zh-TW, ko, es, fr, de, ...                 | auto                  | Language to translate FROM (auto = auto-detect)                             |
-| Target language          | en, ja, zh-CN, zh-TW, ko, es, fr, de, ...                       | en                    | Language to translate INTO                                                  |
-| Backend server URL       | Any URL                                                         | http://localhost:8000 | Where the Python backend runs (PaddleOCR and MangaOCR only)                 |
-| Public-provider fallback | On / Off                                                        | Off                   | Whether a failed private/paid provider may retry through MyMemory           |
-| Overlay font             | Sans Serif, Serif, Manga-Friendly, Monospace                    | Sans Serif            | Font family for the translated text                                         |
-| Minimum font size        | 8, 10, 12, 14, 16 px                                            | 10 px                 | Smallest size the overlay will shrink text to                               |
-| Alignment                | Auto, Left, Center, Right                                       | Auto                  | Text alignment inside each block (Auto follows the source layout)           |
-| Overlay opacity          | 0% – 100%                                                       | 100%                  | How opaque the translation overlay is                                       |
-| Preprocess in background | On / Off                                                        | Off                   | Run OCR and translation ahead of the click so the overlay appears instantly |
-| Activate automatically   | On / Off                                                        | On                    | Show the per-image buttons on every site not switched off                   |
-| Minimum image size       | 32 – 4096 px wide / high                                        | 100 × 50 px           | Ignore images smaller than this                                             |
-| Parallel images          | 1 – 12                                                          | 5                     | How many images are processed at once                                       |
-| Read Aloud               | On / Off + ElevenLabs key, voice, model                         | Off                   | Adds a Read button that speaks the translated text                          |
-| Low-confidence markers   | On / Off                                                        | On                    | Thin warning underline on weaker OCR regions                                |
-
-
-## Test URLs
-
-Try these pages to test the extension:
-
-| Description                         | URL                                                              |
-|-------------------------------------|------------------------------------------------------------------|
-| Japanese Wikipedia (text in images) | https://ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC                 |
-| Chinese Wikipedia                   | https://zh.wikipedia.org/wiki/%E5%8C%97%E4%BA%AC%E5%B8%82       |
-| Korean Wikipedia                    | https://ko.wikipedia.org/wiki/%EC%84%9C%EC%9A%B8%ED%8A%B9%EB%B3%84%EC%8B%9C |
-| Wikimedia Commons (foreign signs)   | https://commons.wikimedia.org/wiki/Category:Japanese_road_signs  |
-
-
-## Project Structure
-
-```
-Manga-Translate/
-  README.md                     # This file
-  LICENSE                       # MIT License
-  .env.example                  # Documents the keys the popup asks for (no code reads it)
-  .github/workflows/ci.yml      # CI: extension tests + build, website lint/typecheck/build, backend tests
-  setup.sh / setup.ps1          # One-command setup (backend venv + extension build)
-  AGENTS.md, REPO_MAP.md, PIPELINES.md, TASK_STATE.md, DECISIONS.md, AUDIT.md
-                                # Context files for coding assistants
-
-  lensmu/
-    backend/                    # Python FastAPI server
-      server.py                 # Server entry point, API routes
-      security.py               # Rate limiting, input validation, security headers
-      test_server.py            # API contract tests
-      test_paddle_ocr.py        # PaddleOCR wrapper tests (run against a stub engine)
-      requirements.txt          # Core Python dependencies
-      requirements-ocr.txt      # Optional OCR engine dependencies
-      requirements-dev.txt      # Server and test dependencies
-      Dockerfile                # Container build file
-      .dockerignore             # Docker build exclusions
-      ocr_engines/              # OCR engine wrappers
-        paddle_ocr.py           # PaddleOCR wrapper
-        manga_ocr.py            # MangaOCR wrapper
-
-    extension/                  # Chromium browser extension
-      manifest.json             # Extension manifest (MANIFEST_GUIDE.md explains every field)
-      background.js             # Service worker (message routing, OCR proxy, tab state)
-      content.js                # Content script (finds images, per-image controls, pipeline)
-      overlay.js                # Canvas rendering engine (grouping, layout, drawing)
-      offscreen/                # Offscreen document that runs Tesseract.js
-      ocr/tesseract.js          # In-browser OCR worker wrapper
-      translate/                # Translation providers
-        translate-manager.js    # Provider router and already-translated heuristics
-        llm-translate.js        # OpenAI / Claude / Gemini / custom client
-        libre-translate.js      # MyMemory client
-      tts/elevenlabs.js         # Read-aloud synthesis and audio cache
-      auth/auth0.js             # Auth0 PKCE sign-in
-      shared/                   # Canonical preferences, model lists, text helpers (shared with the website)
-      utils/storage.js          # chrome.storage access and legacy migration
-      src/popup/                # Popup UI (React)
-        App.jsx                 # Main popup component
-        components/             # Settings sub-components
-      test/                     # node --test unit tests
-      lib/                      # Vendored Tesseract.js runtime and WASM cores
-      icons/                    # Extension icons
-      package.json              # Node.js dependencies
-      vite.config.js            # Vite build configuration
-      dist/                     # Built popup (generated by npm run build)
-
-    website/                    # Next.js marketing site, limited demo and preferences API
-```
-
-
-## Development Workflow
-
-When actively developing, use watch mode to auto-rebuild on changes:
-
-```bash
-# Terminal 1: backend
+```sh
 cd lensmu/backend
-source venv/bin/activate
-uvicorn server:app --host 127.0.0.1 --port 8000 --reload
-
-# Terminal 2: extension build watcher
-cd lensmu/extension
-npm run watch
+python -m venv venv
+# PowerShell: .\venv\Scripts\Activate.ps1
+# macOS/Linux: source venv/bin/activate
+python -m pip install -r requirements-ocr.txt
+python server.py
 ```
 
-After the watcher rebuilds, go to `chrome://extensions` and click the refresh icon on VisionTranslate to reload it.
+| Profile | Installation | Engines |
+|---|---|---|
+| Core | `python -m pip install -r requirements.txt` | Server without optional OCR libraries |
+| Development | `python -m pip install -r requirements-dev.txt` | Core plus deterministic test tools |
+| OCR 2 | `python -m pip install -r requirements-ocr.txt` | PaddleOCR 2.10.0 / PaddlePaddle 2.6.2 plus MangaOCR |
+| OCR 3 | `python -m pip install -r requirements-ocr3.txt` | PaddleOCR 3.2.0 / PaddlePaddle 3.2.2 plus MangaOCR |
 
+Exact dependency constraints are under `lensmu/backend/constraints`. Both OCR profiles passed real English, Japanese horizontal/vertical, colored-text, shifted-coordinate and blank-image cases on Windows with Python 3.12. See the backend implementation report for the full matrix. Installing a profile on another OS still requires platform qualification.
+
+The server binds to `127.0.0.1:8000` by default. Check `http://localhost:8000/health` and use the same backend URL in extension settings. Models download on first recognition. MangaOCR reads Japanese; select Japanese or automatic source language.
+
+From the repository root, the setup scripts create the backend environment and build the extension:
+
+```sh
+./setup.sh ocr2
+# PowerShell:
+.\setup.ps1 -Profile ocr2
+```
+
+For core-only setup use `core`; for PaddleOCR 3 use `ocr3`. Setup failures return an error and preserve the original shell location. [Backend documentation](lensmu/backend/README.md) describes configuration and limits.
+
+Docker uses the same profiles, with a loopback-only published port:
+
+```sh
+cd lensmu/backend
+docker build --build-arg OCR_PROFILE=ocr2 -t lensmu-backend .
+docker run --rm -p 127.0.0.1:8000:8000 lensmu-backend
+```
+
+Docker build/run has not been verified on the current machine because Docker is unavailable.
+
+## Website
+
+```sh
+cd lensmu/website
+npm ci
+npm run dev
+```
+
+The website's installation route describes loading the actual extension. Its demo sends images to a local OCR backend, translates with MyMemory and exports the rendered image. Provider limits and partial results are surfaced. The authored sample panel is illustrative; it is not a claim of OCR accuracy.
+
+## Ownership and data flow
+
+1. The popup sends intent to the background worker. Durable settings writes are serialized there and acknowledged only after storage succeeds.
+2. `content.js` loads the page controller. Discovery finds eligible image occurrences; each `ImageSession` owns its controls, revision, overlay and cleanup.
+3. Identical image contents may share a bounded preparation cache. They keep separate display lifetimes. Detaching one image cannot cancel another image's shared preparation.
+4. A single trusted settings snapshot spans OCR and translation. OCR or translation changes, including actual credential rotations, invalidate preparation through an opaque revision. Cosmetic changes redraw existing results.
+5. OCR providers normalize and validate their responses. The translation manager distinguishes translated, unchanged, empty and failed regions.
+6. A shared display plan measures text and placements. The canvas renderer reports what it actually painted; off-image or unreadable regions cannot count as complete success.
+7. Cancellation retires obsolete ownership immediately. Resource capacity remains occupied until work that cannot physically stop has actually finished.
+
+| Module | Responsibility |
+|---|---|
+| `lensmu/extension/background.js` + `lensmu/extension/background/` | Message composition, request scope, live page state, trusted preparation, offscreen lifecycle |
+| `lensmu/extension/content.js` + `lensmu/extension/page/` | Discovery, per-image lifetime, preparation consumers and read aloud |
+| `lensmu/extension/overlay.js` + `lensmu/extension/render/` | Reversible host-page mounting, grouping and rendering |
+| `lensmu/extension/ocr/`, `lensmu/extension/translate/`, `lensmu/extension/tts/` | Provider boundaries |
+| `lensmu/extension/shared/` | Canonical preferences, response contracts, display plans and bounded queues/cache |
+| `lensmu/extension/src/popup/` | Settings draft, page/account/playback sessions and UI |
+| `lensmu/backend/ocr_runtime.py`, `lensmu/backend/image_decoder.py` | Bounded inference ownership and image validation before model work |
+| `lensmu/website/lib/` | Demo input, OCR, translation, rendering and cancellable UI session |
+
+The [ownership decision](docs/adr/0001-image-and-settings-ownership.md) records the alternatives and tradeoffs. [REPO_MAP.md](REPO_MAP.md) and [PIPELINES.md](PIPELINES.md) provide navigation.
+
+## Validation and development
+
+```sh
+# Extension
+cd lensmu/extension
+npm test
+npm run build
+
+# Website
+cd lensmu/website
+npm run lint
+npm run typecheck
+npm test
+npm run build
+
+# Backend (development profile)
+cd lensmu/backend
+python -m pytest -q
+```
+
+The directory changes above are separate commands from the repository root. CI performs clean installs and checks all three applications. Live OCR tests are opt-in because they download models and require an OCR profile; instructions are in the backend report. Browser acceptance uses an isolated profile and local fixtures.
+
+Use `npm run watch` in the extension while developing, then reload the extension on `chrome://extensions` after changes. Keep credentials out of source, logs and fixtures.
 
 ## Troubleshooting
 
-### Backend won't start
+- **No page controls:** use a normal webpage, activate lensmu, and check minimum image dimensions. Images removed or replaced by the host page receive new lifetimes.
+- **Backend unavailable:** check its health URL, port and the selected backend URL. PaddleOCR/MangaOCR require the corresponding Python profile; Tesseract does not.
+- **Poor recognition:** choose the actual source language and a suitable OCR engine. Blank, tiny or low-contrast regions may produce no readable result.
+- **Translation failure:** check provider configuration and quota. Enabling public fallback explicitly allows the recognized text to be sent to MyMemory.
+- **Settings save failed:** correct the reported storage error and retry; failed writes do not become successful saves.
 
-- **Virtual environment not activated:** You should see `(venv)` in your terminal. If not, run `source venv/bin/activate` (macOS/Linux) or `.\venv\Scripts\Activate.ps1` (Windows).
-- **Dependencies not installed:** Run `pip install -r requirements.txt` again.
-- **Port 8000 in use:** Use a different port: `uvicorn server:app --host 127.0.0.1 --port 8001 --reload` and update the backend URL in the extension settings.
-- **PaddlePaddle import error:** the pinned paddlepaddle 2.6.2 ships wheels for Python 3.8–3.12 only, and the backend itself needs 3.10–3.12. Use Tesseract.js as an alternative.
+## Team and license
 
-### Extension can't reach the backend
+Built at HackSMU VII by [bornayo7](https://github.com/bornayo7), [Logan722](https://github.com/Logan722), and [KBuildingPrograms](https://github.com/KBuildingPrograms).
 
-- **Backend isn't running:** Check for `Uvicorn running on http://127.0.0.1:8000` in your terminal.
-- **Wrong backend URL:** The extension defaults to `http://localhost:8000`. Verify in the popup settings.
-- **CORS issue:** The backend includes CORS middleware for `chrome-extension://` and `moz-extension://` origins.
-
-### OCR results are poor or empty
-
-- **Wrong engine for the language:** PaddleOCR supports 80+ languages. MangaOCR is ONLY for Japanese.
-- **Image too small:** Images under ~200px wide often produce poor results. Try larger images.
-- **Try a different engine:** Different engines work better for different text types and layouts.
-
-### Translation is wrong or garbled
-
-- **Wrong source language:** Try setting the source language explicitly instead of auto-detect.
-- **OCR errors:** If the OCR misread characters, the translation will be wrong. Try a different OCR engine.
-- **Specialized text:** Manga slang and onomatopoeia are challenging for translation services.
-
-
-## Team
-
-Built at HackSMU VII by:
-- [bornayo7](https://github.com/bornayo7)
-- [Logan722](https://github.com/Logan722)
-- [KBuildingPrograms](https://github.com/KBuildingPrograms)
-
-
-## License
-
-[MIT](LICENSE)
+[MIT License](LICENSE)
