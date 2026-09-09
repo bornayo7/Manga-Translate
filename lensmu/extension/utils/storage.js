@@ -1,132 +1,75 @@
-// Chrome storage helpers for extension settings and API keys.
+// The background owns durable intent; failed reads must never become defaults
+// that a subsequent write can persist over the user's existing settings.
+import { DEFAULT_EXTENSION_SETTINGS, SETTINGS_STORAGE_KEY, PREPARATION_SETTING_KEYS, mergeWithDefaults } from '../shared/preferences.js';
 
-import {
-  DEFAULT_EXTENSION_SETTINGS,
-  SETTINGS_STORAGE_KEY as SETTINGS_KEY,
-  mergeWithDefaults
-} from '../shared/preferences.js';
+const LEGACY_KEYS = Object.keys(DEFAULT_EXTENSION_SETTINGS);
+const REVISION_KEY = 'vt_settings_revision';
+const PREPARATION_KEY = 'vt_preparation_revision';
+const DOMAINS_KEY = 'vt_disabled_domains';
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-const LEGACY_SETTING_KEYS = Object.freeze(Object.keys(DEFAULT_EXTENSION_SETTINGS));
+export function createSettingsStore(storage, newRevision = () => crypto.randomUUID()) {
+  let chain = Promise.resolve();
+  const serialize = work => {
+    const result = chain.then(work);
+    chain = result.catch(() => undefined);
+    return result;
+  };
 
-function getLegacySettings(storageSnapshot = {}) {
-  return Object.fromEntries(
-    LEGACY_SETTING_KEYS.filter((key) => key in storageSnapshot).map((key) => [key, storageSnapshot[key]])
-  );
-}
-
-async function migrateLegacySettings(storageSnapshot = {}) {
-  const legacySettings = getLegacySettings(storageSnapshot);
-
-  if (Object.keys(legacySettings).length === 0) {
-    return null;
+  async function read() {
+    const snapshot = await storage.get([SETTINGS_STORAGE_KEY, REVISION_KEY, PREPARATION_KEY, ...LEGACY_KEYS]);
+    if (snapshot[SETTINGS_STORAGE_KEY] !== undefined && !isRecord(snapshot[SETTINGS_STORAGE_KEY])) {
+      throw new Error('Saved settings are invalid. Restore or repair them before saving changes.');
+    }
+    const legacyKeys = LEGACY_KEYS.filter(key => Object.hasOwn(snapshot, key));
+    let settings = snapshot[SETTINGS_STORAGE_KEY];
+    let revision = snapshot[REVISION_KEY] || 'initial';
+    let preparationRevision = snapshot[PREPARATION_KEY] || revision;
+    if (!settings && legacyKeys.length) {
+      settings = mergeWithDefaults(Object.fromEntries(legacyKeys.map(key => [key, snapshot[key]])));
+      revision = newRevision();
+      preparationRevision = revision;
+      await storage.set({ [SETTINGS_STORAGE_KEY]: settings, [REVISION_KEY]: revision, [PREPARATION_KEY]: preparationRevision });
+    }
+    if (settings && legacyKeys.length) await storage.remove(legacyKeys);
+    return { ...mergeWithDefaults(settings), settingsRevision: revision, preparationRevision };
   }
 
-  const migratedSettings = mergeWithDefaults(legacySettings);
+  async function domains() {
+    const value = (await storage.get(DOMAINS_KEY))[DOMAINS_KEY];
+    if (value !== undefined && (!Array.isArray(value) || value.some(item => typeof item !== 'string'))) {
+      throw new Error('Saved disabled-site preferences are invalid.');
+    }
+    return value || [];
+  }
 
-  await chrome.storage.local.set({ [SETTINGS_KEY]: migratedSettings });
-  await chrome.storage.local.remove(LEGACY_SETTING_KEYS);
-
-  console.log(
-    '[VisionTranslate] Migrated legacy settings into vt_settings:',
-    redactSecretsForLog(migratedSettings)
-  );
-
-  return migratedSettings;
-}
-
-function redactSecretsForLog(settings = {}) {
-  return Object.fromEntries(
-    Object.entries(settings).map(([key, value]) => {
-      if (/api.?key|token|secret/i.test(key)) {
-        return [key, value ? '[redacted]' : ''];
-      }
-
-      return [key, value];
+  return {
+    load: () => serialize(read),
+    applyPatch: patch => serialize(async () => {
+      if (!isRecord(patch)) throw new TypeError('Settings patch must be an object.');
+      const current = await read();
+      const settings = mergeWithDefaults({ ...current, ...patch });
+      const changed = LEGACY_KEYS.some(key => current[key] !== settings[key]);
+      const preparationChanged = PREPARATION_SETTING_KEYS.some(key => current[key] !== settings[key]);
+      const revision = changed || current.settingsRevision === 'initial' ? newRevision() : current.settingsRevision;
+      const preparationRevision = preparationChanged || current.preparationRevision === 'initial' ? revision : current.preparationRevision;
+      await storage.set({ [SETTINGS_STORAGE_KEY]: settings, [REVISION_KEY]: revision, [PREPARATION_KEY]: preparationRevision });
+      return { ...settings, settingsRevision: revision, preparationRevision };
+    }),
+    disabledDomains: () => serialize(domains),
+    setDomainDisabled: (hostname, disabled) => serialize(async () => {
+      if (typeof hostname !== 'string' || !hostname) throw new TypeError('A hostname is required.');
+      const next = new Set(await domains());
+      if (disabled) next.add(hostname); else next.delete(hostname);
+      await storage.set({ [DOMAINS_KEY]: [...next] });
     })
-  );
+  };
 }
 
-// Reads settings, merging stored values over defaults.
-export async function getSettings() {
-  try {
-    const result = await chrome.storage.local.get([SETTINGS_KEY, ...LEGACY_SETTING_KEYS]);
-
-    if (result[SETTINGS_KEY] && typeof result[SETTINGS_KEY] === 'object' && !Array.isArray(result[SETTINGS_KEY])) {
-      /*
-       * vt_settings wins, but pre-migration top-level keys can still be
-       * sitting alongside it (migrateLegacySettings only runs when
-       * vt_settings is absent). Clear them once, here, rather than on every
-       * save.
-       */
-      const staleLegacyKeys = LEGACY_SETTING_KEYS.filter((key) => key in result);
-      if (staleLegacyKeys.length > 0) {
-        await chrome.storage.local.remove(staleLegacyKeys);
-      }
-
-      return mergeWithDefaults(result[SETTINGS_KEY]);
-    }
-
-    const migratedSettings = await migrateLegacySettings(result);
-
-    if (migratedSettings) {
-      return migratedSettings;
-    }
-
-    return mergeWithDefaults();
-  } catch (error) {
-    console.error('[VisionTranslate] Error reading settings:', error);
-    return mergeWithDefaults();
-  }
-}
-
-/*
- * Saves are serialised. Each one is a read-merge-write, and the popup now
- * sends a small patch per change instead of one debounced snapshot, so two
- * message handlers can easily overlap; without the chain the second read
- * would miss the first write and the earlier change would be lost.
- */
-let saveChain = Promise.resolve();
-
-// Merges partial settings update into stored settings. Resolves to the
-// merged object actually written; rejects if storage refused the write.
-export function saveSettings(settings) {
-  const run = saveChain.then(async () => {
-    const current = await getSettings();
-    const merged = mergeWithDefaults({ ...current, ...(settings || {}) });
-    await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
-    console.log('[VisionTranslate] Settings saved:', redactSecretsForLog(merged));
-    return merged;
-  });
-  saveChain = run.catch(() => undefined);
-  return run.catch((error) => {
-    console.error('[VisionTranslate] Error saving settings:', error);
-    throw error;
-  });
-}
-
-// Per-domain disable list. Extension is ON by default; disabling a site adds it here.
-const DISABLED_DOMAINS_KEY = 'vt_disabled_domains';
-
-export async function getDisabledDomains() {
-  try {
-    const result = await chrome.storage.local.get(DISABLED_DOMAINS_KEY);
-    return result[DISABLED_DOMAINS_KEY] || [];
-  } catch (error) {
-    console.error('[VisionTranslate] Error reading disabled domains:', error);
-    return [];
-  }
-}
-
-export async function addDisabledDomain(hostname) {
-  const domains = await getDisabledDomains();
-  if (!domains.includes(hostname)) {
-    domains.push(hostname);
-    await chrome.storage.local.set({ [DISABLED_DOMAINS_KEY]: domains });
-  }
-}
-
-export async function removeDisabledDomain(hostname) {
-  const domains = await getDisabledDomains();
-  const filtered = domains.filter(d => d !== hostname);
-  await chrome.storage.local.set({ [DISABLED_DOMAINS_KEY]: filtered });
-}
+let store;
+const currentStore = () => store ||= createSettingsStore(chrome.storage.local);
+export const getSettings = () => currentStore().load();
+export const saveSettings = patch => currentStore().applyPatch(patch);
+export const getDisabledDomains = () => currentStore().disabledDomains();
+export const addDisabledDomain = hostname => currentStore().setDomainDisabled(hostname, true);
+export const removeDisabledDomain = hostname => currentStore().setDomainDisabled(hostname, false);

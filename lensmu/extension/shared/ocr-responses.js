@@ -93,6 +93,38 @@ function detectionText(detection) {
   return typeof detection?.text === 'string' ? detection.text.trim() : String(detection?.text ?? '').trim();
 }
 
+// TypeScript annotations and HTTP 200 cannot establish a provider contract.
+// Preserve region positions/order and explicit partial errors at this boundary.
+export function decodeBackendOcrResponse(data, { engine = 'paddle', expectedCount } = {}) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.detections)) {
+    throw new Error(`${engine} OCR returned an invalid detection response.`);
+  }
+  if ((expectedCount !== undefined && data.detections.length !== expectedCount) ||
+      (data.count !== undefined && data.count !== data.detections.length)) {
+    throw new Error(`${engine} OCR returned a mismatched region count.`);
+  }
+  const detections = data.detections.map((item, index) => {
+    const box = item?.bbox;
+    if (!item || typeof item.text !== 'string' || !Array.isArray(box) || box.length !== 4 ||
+        box.some(value => typeof value !== 'number' || !Number.isFinite(value)) ||
+        box[0] < 0 || box[1] < 0 || box[2] <= box[0] || box[3] <= box[1] ||
+        (item.confidence !== undefined && (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence)))) {
+      throw new Error(`${engine} OCR returned an invalid region at position ${index + 1}.`);
+    }
+    if (item.error !== undefined && item.error !== null && typeof item.error !== 'string') {
+      throw new Error(`${engine} OCR returned an invalid region error.`);
+    }
+    return { ...item, bbox: box.slice() };
+  });
+  if (detections.length && detections.every(item => item.error)) {
+    throw new Error(`${engine} OCR failed to recognize every requested region.`);
+  }
+  const warnings = Array.isArray(data.warnings) ? data.warnings.filter(item => typeof item === 'string') : [];
+  const failed = detections.filter(item => item.error).length;
+  if (failed) warnings.push(`${engine} OCR failed on ${failed} region${failed === 1 ? '' : 's'}; fallback recognition is identified separately.`);
+  return { detections, warnings };
+}
+
 function paddleBlock(detection, source) {
   const bbox = Array.isArray(detection?.bbox) ? detection.bbox.map((value) => Math.round(Number(value) || 0)) : [0, 0, 0, 0];
   const confidence = Number(detection?.confidence);

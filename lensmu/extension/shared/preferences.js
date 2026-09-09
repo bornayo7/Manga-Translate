@@ -75,6 +75,29 @@ export const SENSITIVE_SETTING_KEYS = Object.freeze([
 
 export const SETTING_KEYS = Object.freeze(Object.keys(DEFAULT_EXTENSION_SETTINGS));
 
+// Visual and speech choices do not invalidate recognized/translated content.
+export const PREPARATION_SETTING_KEYS = Object.freeze([
+  'targetLanguage', 'sourceLanguage', 'translationProvider', 'allowThirdPartyFallback',
+  'backendUrl', 'googleCloudApiKey', 'customOcrUrl', 'customOcrApiKey', 'openaiApiKey',
+  'claudeApiKey', 'geminiApiKey', 'customApiKey', 'customBaseUrl', 'customModelName',
+  'llmModel', 'ocrEngine'
+]);
+
+export const SETTING_ENUMS = Object.freeze({
+  translationProvider: ['libre', 'openai', 'claude', 'gemini', 'custom'],
+  ocrEngine: ['tesseract', 'paddleocr', 'mangaocr', 'google_vision', 'custom_ocr'],
+  overlayFontFamily: ['sans', 'serif', 'manga', 'mono'],
+  overlayTextAlign: ['auto', 'left', 'center', 'right'],
+});
+
+export const SETTING_STRING_LIMITS = Object.freeze(Object.fromEntries(
+  SETTING_KEYS.filter(key => typeof DEFAULT_EXTENSION_SETTINGS[key] === 'string').map(key => [key,
+    key === 'fontOverride' ? 120 : ['llmModel', 'elevenLabsVoiceId'].includes(key) ? 128 :
+    ['elevenLabsModelId', 'elevenLabsOutputFormat'].includes(key) ? 64 :
+    ['sourceLanguage', 'targetLanguage', 'translationProvider', 'ocrEngine', 'overlayFontFamily', 'overlayTextAlign'].includes(key) ? 32 : 512])
+));
+export const SETTING_INTEGER_KEYS = Object.freeze(['minImageWidth', 'minImageHeight', 'maxConcurrentImages', 'overlayMinFontSize']);
+
 // Valid ranges for numeric settings. Enforced at the merge boundary so a
 // value from *any* writer (popup, sync payload, hand-edited store) arrives
 // in range; the popup's fields use the same numbers for their min/max.
@@ -197,11 +220,49 @@ export function pickSyncedPreferences(settings = {}) {
   return splitSettingsForSync(settings).synced;
 }
 
+// Strict external-input validation shares the canonical defaults/ranges with
+// storage migration, which intentionally accepts older/coercible values.
+export function validateSyncedPreferences(value, { partial = false } = {}) {
+  const issues = [];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { success: false, issues: [{ path: [], message: 'Preferences must be an object.' }] };
+  }
+  for (const key of Object.keys(value)) {
+    if (!SYNCED_PREFERENCE_KEYS.includes(key)) issues.push({ path: [key], message: 'Unknown or local-only preference.' });
+  }
+  for (const key of SYNCED_PREFERENCE_KEYS) {
+    const item = value[key];
+    if (item === undefined && partial) continue;
+    if (item === undefined) {
+      issues.push({ path: [key], message: 'Preference is required.' });
+      continue;
+    }
+    const type = typeof DEFAULT_EXTENSION_SETTINGS[key];
+    const range = SETTING_RANGES[key];
+    if (typeof item !== type || (type === 'number' && !Number.isFinite(item))) {
+      issues.push({ path: [key], message: `Expected ${type}.` });
+    } else if (range && (item < range.min || item > range.max)) {
+      issues.push({ path: [key], message: `Must be between ${range.min} and ${range.max}.` });
+    } else if (SETTING_INTEGER_KEYS.includes(key) && !Number.isInteger(item)) {
+      issues.push({ path: [key], message: 'Expected an integer.' });
+    } else if (type === 'string' && item.length > SETTING_STRING_LIMITS[key]) {
+      issues.push({ path: [key], message: 'Preference text is too long.' });
+    } else if (SETTING_ENUMS[key] && !SETTING_ENUMS[key].includes(item)) {
+      issues.push({ path: [key], message: 'Unsupported preference value.' });
+    }
+  }
+  if (issues.length) return { success: false, issues };
+  const merged = pickSyncedPreferences(value);
+  return { success: true, data: partial ? Object.fromEntries(Object.keys(value).map(key => [key, merged[key]])) : merged };
+}
+
 export function toContentScriptSettings(settings = {}) {
   const merged = mergeWithDefaults(settings);
   const safeSettings = Object.fromEntries(
     Object.entries(merged).filter(([key]) => !SENSITIVE_SETTING_KEYS.includes(key))
   );
+  if (typeof settings.settingsRevision === 'string') safeSettings.settingsRevision = settings.settingsRevision;
+  if (typeof settings.preparationRevision === 'string') safeSettings.preparationRevision = settings.preparationRevision;
 
   safeSettings.configuredCredentials = Object.freeze(
     Object.fromEntries(

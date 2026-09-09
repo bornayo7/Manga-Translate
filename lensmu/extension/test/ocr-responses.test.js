@@ -146,3 +146,18 @@ test('a normal Vision answer maps words to boxes and reads the locale', () => {
   assert.deepEqual(result.blocks.map((block) => block.text), ['こんにちは', '世界']);
   assert.deepEqual(result.blocks[1].bbox, { x: 60, y: 0, width: 40, height: 20 });
 });
+
+test('backend decoder distinguishes malformed success, no text and partial errors', async () => {
+  const { decodeBackendOcrResponse } = await import('../shared/ocr-responses.js');
+  assert.throws(() => decodeBackendOcrResponse(null), /invalid detection/);
+  assert.throws(() => decodeBackendOcrResponse({ detections: {} }), /invalid detection/);
+  assert.deepEqual(decodeBackendOcrResponse({ detections: [], count: 0 }), { detections: [], warnings: [] });
+  assert.throws(() => decodeBackendOcrResponse({ detections: [{ text: 'hello', bbox: [0, 0, 1] }] }), /invalid region/);
+  const detections = [{ text: '', bbox: [0, 0, 5, 5], error: 'failed' }, { text: 'hello', bbox: [5, 0, 10, 5] }];
+  assert.throws(() => decodeBackendOcrResponse({ detections }, { engine: 'manga', expectedCount: 3 }), /mismatched/);
+  const partial = decodeBackendOcrResponse({ detections }, { engine: 'manga', expectedCount: 2 });
+  assert.equal(partial.detections[0].error, 'failed');
+  assert.equal(partial.detections[1].text, 'hello');
+  assert.equal(partial.warnings.length, 1);
+  assert.throws(() => decodeBackendOcrResponse({ detections: [detections[0]] }, { engine: 'manga' }), /every requested region/);
+});

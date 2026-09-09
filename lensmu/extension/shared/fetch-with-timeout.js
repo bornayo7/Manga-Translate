@@ -98,36 +98,7 @@ export async function fetchWithTimeout(input, init = {}, options = {}) {
   try {
     const response = await fetch(input, { ...init, signal: controller.signal });
 
-    /*
-     * The stream read is raced against the request signal rather than
-     * relying on the runtime to reject the read: a body produced by a
-     * service worker, a mocked fetch, or a cached response is not always
-     * wired to the request's signal, and the deadline must hold regardless
-     * of where the bytes come from.
-     */
-    const signal = controller.signal;
-    let onAbort = null;
-    const aborted = new Promise((_, reject) => {
-      onAbort = () => reject(signal.reason);
-      if (signal.aborted) {
-        onAbort();
-      } else {
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
-    });
-    aborted.catch(() => undefined);
-
-    let bytes;
-    try {
-      bytes = await Promise.race([readResponseBytesWithLimit(response, maxResponseBytes), aborted]);
-    } catch (error) {
-      if (signal.aborted) {
-        response.body?.cancel?.(signal.reason).catch?.(() => undefined);
-      }
-      throw error;
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
+    const bytes = await readResponseBytesWithLimit(response, maxResponseBytes, { signal: controller.signal });
 
     const result = {
       ok: response.ok,

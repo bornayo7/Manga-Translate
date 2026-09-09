@@ -176,7 +176,7 @@ async function runCustom(handler) {
 test('a missing block is re-requested alone and slotted back by its original index', async () => {
   const mock = installFetchMock(({ call }) => {
     if (call === 1) {
-      return chatCompletion('[1] First bubble\n[3] Third bubble', 'length');
+      return chatCompletion('[1] First bubble\n[3] Third bubble');
     }
     return chatCompletion('[1] Second bubble');
   });
@@ -208,7 +208,7 @@ test('truncated output that stays incomplete after the retry is an error, not a 
       }),
     (error) => {
       assert.match(error.message, /incomplete numbered response for 3 text blocks/);
-      assert.match(error.message, /missing block 3/);
+      assert.match(error.message, /missing blocks 2, 3/);
       assert.match(error.message, /output limit/);
       return true;
     }
@@ -256,4 +256,20 @@ test('an HTTP error surfaces the provider message and never retries', async () =
     /Custom API error \(404\): model not found/
   );
   assert.equal(calls, 1);
+});
+
+test('truncation with all markers retries the entire answer, including its incomplete tail', async () => {
+  const mock = installFetchMock(({ call }) => chatCompletion(call === 1
+    ? '[1] One\n[2] Two\n[3] We need to'
+    : '[1] One\n[2] Two\n[3] We need to go.', call === 1 ? 'length' : 'stop'));
+  try {
+    const result = await translateWithLLM(TEXTS, 'ja', 'en', '', 'custom', 'local-model', 'http://localhost:11434/v1');
+    assert.equal(result.translations[2], 'We need to go.');
+    assert.equal(result.retryCount, 1);
+    assert.match(mock.calls[1].body.messages[1].content, /三つ目/);
+  } finally { mock.restore(); }
+});
+
+test('a second length stop fails even when every numbered item is present', async () => {
+  await assert.rejects(runCustom(() => chatCompletion('[1] One\n[2] Two\n[3] We need to', 'length')), /output limit/);
 });

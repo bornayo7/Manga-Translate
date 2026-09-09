@@ -1,4 +1,7 @@
 export type MangaBbox = [number, number, number, number];
+export type BackendDetection = { text: string; bbox: number[]; confidence?: number; orientation?: string; error?: string | null; source?: string };
+export function decodeBackendOcrResponse(data: unknown, options?: { engine?: 'paddle' | 'manga'; expectedCount?: number }):
+  { detections: BackendDetection[]; warnings: string[] };
 
 export type MangaBatch = { indices: number[]; bboxes: MangaBbox[] };
 

@@ -113,3 +113,20 @@ test('pickSyncedPreferences is a strict allowlist', () => {
   assert.equal('authToken' in synced, false);
   assert.equal('openaiApiKey' in synced, false);
 });
+
+test('strict synced validation uses canonical types, ranges and local-only policy', async () => {
+  const { validateSyncedPreferences, DEFAULT_SYNCED_PREFERENCES } = await import('../shared/preferences.js');
+  assert.equal(validateSyncedPreferences(DEFAULT_SYNCED_PREFERENCES).success, true);
+  for (const patch of [{ openaiApiKey: 'dummy' }, { maxConcurrentImages: 1.5 }, { overlayOpacity: 2 }, { darkMode: 'true' }, { overlayFontFamily: 'unknown' }]) {
+    assert.equal(validateSyncedPreferences({ ...DEFAULT_SYNCED_PREFERENCES, ...patch }).success, false);
+  }
+  assert.deepEqual(validateSyncedPreferences({ darkMode: true }, { partial: true }), { success: true, data: { darkMode: true } });
+  assert.equal(validateSyncedPreferences({}).success, false);
+});
+
+test('opaque preparation revision survives credential stripping without secret values', () => {
+  const result = toContentScriptSettings({ openaiApiKey: 'dummy', settingsRevision: 'r2', preparationRevision: 'p1' });
+  assert.equal(result.openaiApiKey, undefined);
+  assert.equal(result.settingsRevision, 'r2');
+  assert.equal(result.preparationRevision, 'p1');
+});

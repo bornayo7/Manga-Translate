@@ -61,6 +61,8 @@ export type SensitiveSettingKey =
   | 'customApiKey'
   | 'elevenLabsApiKey';
 export type ContentScriptSettings = Omit<ExtensionSettings, SensitiveSettingKey> & {
+  settingsRevision?: string;
+  preparationRevision?: string;
   configuredCredentials: Readonly<Record<SensitiveSettingKey, boolean>>;
 };
 
@@ -69,6 +71,13 @@ export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings;
 export const LOCAL_ONLY_SETTING_KEYS: readonly LocalOnlySettingKey[];
 export const SENSITIVE_SETTING_KEYS: readonly SensitiveSettingKey[];
 export const SETTING_KEYS: readonly (keyof ExtensionSettings)[];
+export const PREPARATION_SETTING_KEYS: readonly (keyof ExtensionSettings)[];
+export const SETTING_ENUMS: Readonly<Partial<Record<keyof ExtensionSettings, readonly string[]>>>;
+export const SETTING_STRING_LIMITS: Readonly<Partial<Record<keyof ExtensionSettings, number>>>;
+export const SETTING_INTEGER_KEYS: readonly (keyof ExtensionSettings)[];
+export function validateSyncedPreferences(value: unknown, options?: { partial?: boolean }):
+  | { success: true; data: SyncedPreferences | Partial<SyncedPreferences> }
+  | { success: false; issues: Array<{ path: string[]; message: string }> };
 export const SYNCED_PREFERENCE_KEYS: readonly (keyof SyncedPreferences)[];
 export const DEFAULT_SYNCED_PREFERENCES: Readonly<SyncedPreferences>;
 

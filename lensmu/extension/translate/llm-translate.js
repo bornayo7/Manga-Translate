@@ -160,6 +160,7 @@ function describeAlignmentProblem(providerName, parsed, expectedCount, truncated
   if (parsed.outOfRange.length) {
     parts.push(`unexpected number${parsed.outOfRange.length === 1 ? '' : 's'} ${parsed.outOfRange.join(', ')}`);
   }
+  if (truncated) parts.push('provider stopped before completion');
   const cause = truncated
     ? ' The provider hit its output limit; try a smaller page or a model with a larger output budget.'
     : '';
@@ -188,10 +189,10 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
   let truncated = Boolean(first.truncated);
   let retryCount = 0;
 
-  if (parsed.problems && retryCount < MAX_ALIGNMENT_RETRIES) {
+  if ((parsed.problems || truncated) && retryCount < MAX_ALIGNMENT_RETRIES) {
     retryCount += 1;
 
-    if (parsed.missing.length && !parsed.duplicates.length && !parsed.outOfRange.length) {
+    if (!truncated && parsed.missing.length && !parsed.duplicates.length && !parsed.outOfRange.length) {
       /*
        * Only some numbers are absent (typically the tail after a length
        * stop). Ask for those blocks alone, renumbered 1..k, and slot the
@@ -205,9 +206,9 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
       );
       const retry = await requestTranslations(retryTexts, sourceLang, targetLang, apiKey, provider, model, baseUrl, signal);
       const retryParsed = parseNumberedResponseStrict(retry.text, retryTexts.length);
-      truncated = truncated || Boolean(retry.truncated);
+      truncated = Boolean(retry.truncated);
 
-      if (!retryParsed.problems) {
+      if (!retryParsed.problems && !truncated) {
         const merged = parsed.translations.slice();
         missingIndices.forEach((originalIndex, position) => {
           merged[originalIndex] = retryParsed.translations[position];
@@ -225,7 +226,7 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
       }
     } else {
       console.warn(
-        `[VisionTranslate] ${providerName} returned ambiguous numbering (duplicates ${parsed.duplicates.join(', ') || 'none'}; out of range ${parsed.outOfRange.join(', ') || 'none'}); retrying the whole request.`
+        `[VisionTranslate] ${providerName} returned incomplete output or ambiguous numbering; retrying the whole request.`
       );
       const retry = await requestTranslations(texts, sourceLang, targetLang, apiKey, provider, model, baseUrl, signal);
       parsed = parseNumberedResponseStrict(retry.text, texts.length);
@@ -233,7 +234,7 @@ export async function translateWithLLM(texts, sourceLang, targetLang, apiKey, pr
     }
   }
 
-  if (parsed.problems) {
+  if (parsed.problems || truncated) {
     throw new Error(describeAlignmentProblem(providerName, parsed, texts.length, truncated));
   }
 

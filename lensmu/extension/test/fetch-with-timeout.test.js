@@ -10,6 +10,17 @@ import {
 } from '../shared/fetch-with-timeout.js';
 import { installFetchMock, jsonResponse, stalledResponse } from './helpers/fetch-mock.js';
 
+test('deadline cancels the owned body reader and releases its lock', async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }));
+  const mock = installFetchMock(() => response);
+  try {
+    await assert.rejects(fetchWithTimeout('https://example.test/stalled', {}, { timeoutMs: 30 }), { name: 'TimeoutError' });
+    assert.equal(cancelled, true);
+    assert.equal(response.body.locked, false);
+  } finally { mock.restore(); }
+});
+
 test('a stalled body times out even though the headers arrived immediately', async () => {
   const mock = installFetchMock(() => stalledResponse());
   try {
