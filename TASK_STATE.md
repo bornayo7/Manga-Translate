@@ -2,9 +2,19 @@
 
 ## Current goal
 
-Keep the security/reliability repair green and finish the product decisions that require deployed credentials or browser-specific release work.
+Review and plan a staged overhaul on the existing `thermo` branch before implementation. The 2026-09-09 complete review reproduced correctness defects despite passing baseline checks. Current findings live in [CODEBASE_REVIEW.md](CODEBASE_REVIEW.md); proposed changes, acceptance gates and branch integration live in [OVERHAUL_PLAN.md](OVERHAUL_PLAN.md).
 
-## Completed implementation targets
+## Current checkpoint — 2026-09-09
+
+- Reviewed source: `thermo` at `172c2d2`, eight commits ahead of `main` at `bbe553c`. No `master` branch exists; `main` is the GitHub default. No merge or conflict resolution has been performed.
+- Baseline: extension 173/173 tests and build; website 5/5 tests, lint, typecheck and build; backend 53 passed, 1 live-model test skipped. No `thermo` CI run existed; current CI runs on main pushes and pull requests.
+- Full reads: 150 tracked first-party text files, 27,811 lines. Detailed audit reports and coverage are under `docs/reviews/2026-09-09/`.
+- First repairs: durable settings acknowledgment/read failure handling, per-target image ownership/revisions, truthful rendered outcomes and provider completion validation. Existing shared preferences and architecture split remain the foundation.
+- Review/plan documentation only. Source implementation awaits the user's review of the concrete plan and open scope/branch decisions. Real installed-extension, OCR-model, provider and authenticated flows remain unverified.
+
+## Historical implementation checkpoints
+
+The sections below describe earlier passes. Their completion claims are historical and do not close the newly reproduced findings in `CODEBASE_REVIEW.md`.
 
 ### A. Add reusable context files
 Add these files so Codex and Claude do not have to rediscover the repo every session:
