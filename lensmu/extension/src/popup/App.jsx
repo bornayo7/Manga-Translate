@@ -1,669 +1,69 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import OcrSettings, { ENGINE_OPTIONS } from "./components/OcrSettings.jsx";
-import TranslateSettings, {
-  PROVIDER_OPTIONS,
-} from "./components/TranslateSettings.jsx";
+import TranslateSettings, { PROVIDER_OPTIONS } from "./components/TranslateSettings.jsx";
 import LanguageSelector from "./components/LanguageSelector.jsx";
 import ReadAloudSettings from "./components/ReadAloudSettings.jsx";
-import {
-  DEFAULT_EXTENSION_SETTINGS,
-  SETTING_RANGES,
-  clampNumber,
-  mergeWithDefaults,
-} from "../../shared/preferences.js";
-import { trimTrailingSlashes } from "../../shared/text.js";
-import {
-  DEFAULT_LLM_MODELS,
-  describeModelMigration,
-  resolveProviderModel,
-} from "../../shared/llm-models.js";
-import { createSettingsPersister } from "./settings-persistence.js";
+import { ToggleRow, NumberField } from "./components/SettingFields.jsx";
+import { SETTING_RANGES } from "../../shared/preferences.js";
+import { useSettingsSession } from "./use-settings-session.js";
+import { usePageSession } from "./use-page-session.js";
+import { useAccountSession } from "./use-account-session.js";
+import { useSpeechPreview } from "./use-speech-preview.js";
 
-const TAB_ITEMS = [
-  { id: "home", label: "Home" },
-  { id: "engines", label: "Engines" },
-  { id: "settings", label: "Settings" },
-];
-
-const OVERLAY_FONT_OPTIONS = [
-  { id: "sans", label: "Sans Serif" },
-  { id: "serif", label: "Serif" },
-  { id: "manga", label: "Manga-Friendly" },
-  { id: "mono", label: "Monospace" },
-];
-
-const OVERLAY_ALIGNMENT_OPTIONS = [
-  { id: "auto", label: "Auto" },
-  { id: "left", label: "Left" },
-  { id: "center", label: "Center" },
-  { id: "right", label: "Right" },
-];
-
-const MIN_FONT_SIZE_OPTIONS = [8, 10, 12, 14, 16];
-const READ_ALOUD_TEST_TEXT = "This is a VisionTranslate read aloud test.";
-
-/*
- * Normalises what storage handed us and reports every change made, so the
- * popup can persist the migration explicitly and tell the user about it.
- * llmModel is one setting shared by every provider, and providers retire
- * IDs over time: a retired ID is replaced by the provider's documented
- * successor, another provider's ID by the selected provider's default.
- */
-function normalizeLoadedSettings(rawSettings = {}) {
-  const nextSettings = { ...rawSettings };
-  const migrations = [];
-
-  if (nextSettings.translationProvider === "google") {
-    nextSettings.translationProvider = "libre";
-    migrations.push({ key: "translationProvider", from: "google", to: "libre", reason: "removed" });
-  }
-
-  const modelMigration = describeModelMigration(
-    nextSettings.translationProvider,
-    nextSettings.llmModel
-  );
-  if (modelMigration) {
-    nextSettings.llmModel = resolveProviderModel(
-      nextSettings.translationProvider,
-      nextSettings.llmModel
-    );
-    migrations.push({ key: "llmModel", ...modelMigration });
-  }
-
-  return { settings: nextSettings, migrations };
-}
-
-function describeMigrations(migrations) {
-  return migrations
-    .map((migration) => {
-      if (migration.key === "llmModel" && migration.reason === "retired") {
-        return `The saved model "${migration.from}" was retired by its provider; "${migration.to}" is used instead.`;
-      }
-      if (migration.key === "llmModel" && migration.reason === "wrong-provider") {
-        return `The saved model "${migration.from}" belongs to another provider; "${migration.to}" is used instead.`;
-      }
-      if (migration.key === "translationProvider") {
-        return "Google Cloud Translation was removed; MyMemory is selected instead.";
-      }
-      return null;
-    })
-    .filter(Boolean);
-}
-
-function sendRuntimeMessage(message) {
-  return new Promise((resolve, reject) => {
-    if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
-      resolve(null);
-      return;
-    }
-
-    chrome.runtime.sendMessage(message, (response) => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(new Error(error.message));
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-function queryActiveTab() {
-  return new Promise((resolve) => {
-    if (typeof chrome === "undefined" || !chrome.tabs?.query) {
-      resolve(null);
-      return;
-    }
-
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      resolve(tabs?.[0] || null);
-    });
-  });
-}
-
-function sendTabMessage(tabId, message) {
-  return new Promise((resolve, reject) => {
-    if (typeof chrome === "undefined" || !chrome.tabs?.sendMessage || !tabId) {
-      resolve(null);
-      return;
-    }
-
-    chrome.tabs.sendMessage(tabId, message, (response) => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(new Error(error.message));
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-/*
- * One persister for the popup's lifetime. It sends small patches as soon
- * as the current task ends (no timer to lose when the popup closes) and
- * treats anything but { success: true } as a failure. There is no direct
- * storage fallback: writing around the background would bypass its
- * validation and race its serialised saves.
- */
-const settingsPersister = createSettingsPersister({
-  sendMessage: sendRuntimeMessage,
-});
-
-function ToggleRow({
-  label,
-  description,
-  checked,
-  onToggle,
-  badge,
-  disabled = false,
-}) {
-  return (
-    <div className={`toggle-row ${disabled ? "is-disabled" : ""}`}>
-      <div className="toggle-copy">
-        <div className="toggle-title-row">
-          <span className="toggle-label">{label}</span>
-          {badge ? <span className="mini-badge">{badge}</span> : null}
-        </div>
-        {description ? <p className="toggle-description">{description}</p> : null}
-      </div>
-
-      <button
-        type="button"
-        className={`toggle-control ${checked ? "is-on" : ""}`}
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        disabled={disabled}
-        onClick={onToggle}
-      >
-        <span className="toggle-thumb" />
-      </button>
-    </div>
-  );
-}
-
-/*
- * A number input that commits only a complete, in-range value, and only
- * when the user is done with it (blur or Enter).
- *
- * Binding <input type="number"> straight to settings meant that clearing
- * the field to retype it stored Number("") === 0, the 180 ms autosave
- * shipped that 0 to every active tab, and content.js promptly decorated
- * every 1px tracking pixel on the page with a translate icon - icons that
- * stayed once the real value was typed. The input is uncontrolled while it
- * has focus; on blur the text is parsed and clamped, an empty or unparseable
- * field reverts, and an unchanged value does not trigger a save. The key
- * remounts the input whenever the committed value changes from outside.
- */
-function NumberField({ id, label, value, min, max, onCommit }) {
-  function commit(input) {
-    const raw = input.value.trim();
-    const parsed = Number(raw);
-
-    if (raw === "" || !Number.isFinite(parsed)) {
-      input.value = String(value);
-      return;
-    }
-
-    const committed = Math.round(clampNumber(parsed, min, max, value));
-    input.value = String(committed);
-    if (committed !== value) {
-      onCommit(committed);
-    }
-  }
-
-  return (
-    <div className="form-group">
-      <label className="form-label" htmlFor={id}>
-        {label}
-      </label>
-      <input
-        key={value}
-        id={id}
-        className="form-input"
-        type="number"
-        min={min}
-        max={max}
-        step="1"
-        defaultValue={value}
-        onBlur={(event) => commit(event.currentTarget)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.currentTarget.blur();
-          }
-        }}
-      />
-    </div>
-  );
-}
+const TAB_ITEMS = [{id:"home",label:"Translate"},{id:"engines",label:"Engines"},{id:"settings",label:"Settings"}];
+const OVERLAY_FONT_OPTIONS = [{id:"sans",label:"Sans serif"},{id:"serif",label:"Serif"},{id:"manga",label:"Manga"},{id:"mono",label:"Monospace"}];
+const OVERLAY_ALIGNMENT_OPTIONS = [{id:"auto",label:"Auto"},{id:"left",label:"Left"},{id:"center",label:"Center"},{id:"right",label:"Right"}];
+const MIN_FONT_SIZE_OPTIONS = [8,10,12,14,16];
 
 export default function App() {
-  const [settings, setSettings] = useState(DEFAULT_EXTENSION_SETTINGS);
-  const [loaded, setLoaded] = useState(false);
-  const [serverStatus, setServerStatus] = useState("checking");
-  const [activeTabId, setActiveTabId] = useState(null);
-  const [tabState, setTabState] = useState({ active: false });
+  const session = useSettingsSession();
+  const { settings, loaded, migrationNotices, updateSetting } = session;
   const [activeTab, setActiveTab] = useState("home");
-  const [isTogglingPage, setIsTogglingPage] = useState(false);
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [tabUnavailable, setTabUnavailable] = useState(false);
-  const [authUser, setAuthUser] = useState(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(false);
-  const [elevenLabsVoices, setElevenLabsVoices] = useState([]);
-  const [readAloudStatus, setReadAloudStatus] = useState("");
-  const [isLoadingVoices, setIsLoadingVoices] = useState(false);
-  const [isTestingVoice, setIsTestingVoice] = useState(false);
-  const [saveError, setSaveError] = useState("");
-  const [migrationNotices, setMigrationNotices] = useState([]);
-  const testAudioRef = useRef(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadPopupState() {
-      try {
-        const [settingsResponse, currentTab, authState] = await Promise.all([
-          sendRuntimeMessage({ action: "GET_SETTINGS" }).catch(() => null),
-          queryActiveTab(),
-          sendRuntimeMessage({ action: "GET_AUTH_STATE" }).catch(() => null),
-        ]);
-
-        if (!cancelled && authState?.isAuthenticated) {
-          setAuthUser(authState.user);
-        }
-
-        if (cancelled) {
-          return;
-        }
-
-        const normalized = normalizeLoadedSettings(settingsResponse?.settings || {});
-        setSettings(mergeWithDefaults(normalized.settings));
-
-        /*
-         * A migrated value is written back right away so the stored
-         * configuration stops carrying an ID the provider no longer serves,
-         * and the user is told what changed.
-         */
-        if (normalized.migrations.length > 0) {
-          setMigrationNotices(describeMigrations(normalized.migrations));
-          const migratedPatch = Object.fromEntries(
-            normalized.migrations.map((migration) => [migration.key, normalized.settings[migration.key]])
-          );
-          settingsPersister
-            .saveNow(migratedPatch)
-            .catch((error) => setSaveError(error.message));
-        }
-
-        if (currentTab?.id) {
-          setActiveTabId(currentTab.id);
-
-          const tabStateResponse = await sendRuntimeMessage({
-            action: "GET_TAB_STATE",
-            payload: { tabId: currentTab.id },
-          }).catch(() => null);
-
-          if (!cancelled) {
-            setTabState(tabStateResponse?.state || { active: false });
-          }
-        } else {
-          setTabUnavailable(true);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoaded(true);
-        }
-      }
-    }
-
-    loadPopupState();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", settings.darkMode);
-  }, [settings.darkMode]);
-
-  useEffect(() => {
-    return () => {
-      if (testAudioRef.current) {
-        testAudioRef.current.pause();
-        testAudioRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!loaded) {
-      return undefined;
-    }
-
-    const serverBackedEngine = settings.ocrEngine === "paddleocr" || settings.ocrEngine === "mangaocr";
-
-    if (!serverBackedEngine) {
-      setServerStatus("idle");
-      return undefined;
-    }
-
-    let cancelled = false;
-    const controller = new AbortController();
-
-    async function checkServer() {
-      setServerStatus("checking");
-
-      try {
-        const timeoutId = window.setTimeout(() => controller.abort(), 3000);
-        const backendUrl =
-          trimTrailingSlashes(settings.backendUrl) || DEFAULT_EXTENSION_SETTINGS.backendUrl;
-        const response = await fetch(`${backendUrl}/health`, {
-          method: "GET",
-          signal: controller.signal,
-        });
-        window.clearTimeout(timeoutId);
-
-        if (!cancelled) {
-          if (!response.ok) {
-            setServerStatus("offline");
-            return;
-          }
-
-          const health = await response.json().catch(() => null);
-          const selectedServerEngine = settings.ocrEngine;
-          const selectedEngineAvailable =
-            selectedServerEngine === "paddleocr"
-              ? health?.paddle_ocr_available
-              : health?.manga_full_available ??
-                (health?.paddle_ocr_available && health?.manga_ocr_available);
-
-          setServerStatus(selectedEngineAvailable ? "online" : "unavailable");
-        }
-      } catch {
-        if (!cancelled) {
-          setServerStatus("offline");
-        }
-      }
-    }
-
-    checkServer();
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [loaded, settings.backendUrl, settings.ocrEngine]);
-
-  const persistPatch = (patch) => {
-    setSaveError("");
-    settingsPersister.queuePatch(patch);
-    settingsPersister.whenIdle().then(() => {
-      if (settingsPersister.lastError) {
-        setSaveError(settingsPersister.lastError.message);
-      }
-    });
-  };
-
-  const updateSetting = (key, value) => {
-    setSettings((previous) => ({
-      ...previous,
-      [key]: value,
-    }));
-    persistPatch({ [key]: value });
-  };
-
-  const updateTranslationProvider = (provider) => {
-    const patch = {
-      translationProvider: provider,
-      llmModel: DEFAULT_LLM_MODELS[provider] || settings.llmModel,
-    };
-    setSettings((previous) => ({ ...previous, ...patch }));
-    persistPatch(patch);
-    setMigrationNotices([]);
-  };
-
-  /*
-   * Confirms every pending change is stored before an action that depends
-   * on it (translate, load voices, test voice). Throws with the reason on
-   * failure so the caller can show it and stop.
-   */
-  const ensureSettingsSaved = async () => {
-    setSaveError("");
-    try {
-      await settingsPersister.saveNow();
-    } catch (error) {
-      setSaveError(error.message);
-      throw error;
-    }
-  };
-
-  const selectedEngine =
-    ENGINE_OPTIONS.find((option) => option.id === settings.ocrEngine) || ENGINE_OPTIONS[0];
-  const selectedProvider =
-    PROVIDER_OPTIONS.find((option) => option.id === settings.translationProvider) ||
-    PROVIDER_OPTIONS[0];
-
-  const translateRequiresServer =
-    settings.ocrEngine === "paddleocr" || settings.ocrEngine === "mangaocr";
-  const translateDisabled =
-    !activeTabId ||
-    isTranslating ||
-    isTogglingPage ||
-    (translateRequiresServer && serverStatus !== "online");
-
-  const serverStatusCopy = {
-    online: "Backend online",
-    offline: "Backend offline",
-    checking: "Checking backend",
-    idle: "Local engine selected",
-    unavailable:
-      settings.ocrEngine === "mangaocr"
-        ? "MangaOCR unavailable"
-        : "PaddleOCR unavailable",
-  };
-
-  const pageStatusDescription = tabUnavailable
-    ? "This tab does not allow extension scripts."
-    : tabState.active
-      ? "Active on this site. Turning it off will keep it disabled for this domain."
-      : settings.autoTranslate
-        ? "Disabled for this site. Turning it on will re-enable it for future visits."
-        : "Inactive on this page. Automatic activation is off, so you stay in control.";
-
-  async function handleTogglePage() {
-    if (!activeTabId) {
-      return;
-    }
-
-    setIsTogglingPage(true);
-
-    try {
-      const response = await sendRuntimeMessage({
-        action: "TOGGLE_TRANSLATION",
-        payload: { tabId: activeTabId },
-      });
-
-      if (response?.state) {
-        setTabState(response.state);
-      }
-    } catch (error) {
-      console.error("[VisionTranslate] Could not toggle page translation:", error);
-    } finally {
-      setIsTogglingPage(false);
-    }
+  const page = usePageSession(settings, loaded, session.ensureSaved);
+  const account = useAccountSession();
+  const speech = useSpeechPreview(settings, session.ensureSaved, updateSetting);
+  const { tabState, serverStatus, translateDisabled, isTranslating, isTogglingPage } = page;
+  const tabUnavailable = page.unavailable;
+  const authUser = account.user;
+  const isAuthLoading = account.busy;
+  const handleAuthLogin = account.login;
+  const handleAuthLogout = account.logout;
+  const handleTogglePage = page.toggle;
+  const handleTranslatePage = page.translate;
+  const updateTranslationProvider = session.updateProvider;
+  const elevenLabsVoices = speech.voices;
+  const readAloudStatus = speech.status;
+  const isLoadingVoices = speech.loading;
+  const isTestingVoice = speech.testing;
+  const handleLoadVoices = speech.loadVoices;
+  const handleTestVoice = speech.testVoice;
+  const saveError = session.saveState.error?.message || "";
+  const selectedEngine = ENGINE_OPTIONS.find((option)=>option.id===settings.ocrEngine) || ENGINE_OPTIONS[0];
+  const selectedProvider = PROVIDER_OPTIONS.find((option)=>option.id===settings.translationProvider) || PROVIDER_OPTIONS[0];
+  const serverStatusCopy = {online:"Backend ready",offline:"Backend offline",checking:"Checking backend",idle:"No backend needed",unavailable:"OCR unavailable"};
+  const pageStatusDescription = tabUnavailable ? "Open an ordinary webpage to use translation controls." : tabState.active ? "Controls are active on this page." : "Turn on image controls for this site.";
+  function switchTab(event) {
+    const current = TAB_ITEMS.findIndex((item)=>item.id===activeTab);
+    const index = event.key === "Home" ? 0 : event.key === "End" ? TAB_ITEMS.length-1 : event.key === "ArrowRight" ? (current+1)%TAB_ITEMS.length : event.key === "ArrowLeft" ? (current+TAB_ITEMS.length-1)%TAB_ITEMS.length : -1;
+    if (index < 0) return;
+    event.preventDefault();
+    setActiveTab(TAB_ITEMS[index].id);
+    document.getElementById('tab-'+TAB_ITEMS[index].id)?.focus();
   }
-
-  async function handleAuthLogin() {
-    setIsAuthLoading(true);
-    try {
-      const response = await sendRuntimeMessage({ action: "AUTH_LOGIN" });
-      if (response?.success) {
-        setAuthUser(response.user);
-      } else {
-        console.error("[VisionTranslate] Login failed:", response?.error);
-      }
-    } catch (error) {
-      console.error("[VisionTranslate] Login error:", error);
-    } finally {
-      setIsAuthLoading(false);
-    }
-  }
-
-  async function handleAuthLogout() {
-    setIsAuthLoading(true);
-    try {
-      await sendRuntimeMessage({ action: "AUTH_LOGOUT" });
-      setAuthUser(null);
-    } catch (error) {
-      console.error("[VisionTranslate] Logout error:", error);
-    } finally {
-      setIsAuthLoading(false);
-    }
-  }
-
-  async function handleTranslatePage() {
-    if (!activeTabId) {
-      return;
-    }
-
-    setIsTranslating(true);
-
-    try {
-      try {
-        await ensureSettingsSaved();
-      } catch (error) {
-        console.error("[VisionTranslate] Settings were not saved; not translating:", error);
-        return;
-      }
-
-      if (!tabState.active) {
-        const toggleResponse = await sendRuntimeMessage({
-          action: "TOGGLE_TRANSLATION",
-          payload: { tabId: activeTabId },
-        });
-
-        if (toggleResponse?.state) {
-          setTabState(toggleResponse.state);
-        }
-      }
-
-      await sendTabMessage(activeTabId, {
-        action: "TRANSLATE_ALL_IMAGES",
-        payload: {},
-      });
-
-      window.close();
-    } catch (error) {
-      console.error("[VisionTranslate] Could not translate page:", error);
-    } finally {
-      setIsTranslating(false);
-    }
-  }
-
-  async function handleLoadVoices() {
-    setIsLoadingVoices(true);
-    setReadAloudStatus("");
-
-    try {
-      await ensureSettingsSaved();
-
-      const response = await sendRuntimeMessage({
-        action: "LOAD_ELEVENLABS_VOICES",
-      });
-
-      if (!response?.ok) {
-        throw new Error(response?.body?.error || "Could not load ElevenLabs voices.");
-      }
-
-      const voices = response.body?.voices || [];
-      setElevenLabsVoices(voices);
-
-      if (!settings.elevenLabsVoiceId && voices[0]?.voiceId) {
-        updateSetting("elevenLabsVoiceId", voices[0].voiceId);
-      }
-
-      setReadAloudStatus(
-        voices.length
-          ? `Loaded ${voices.length} voice${voices.length === 1 ? "" : "s"}.`
-          : "No voices returned for this account."
-      );
-    } catch (error) {
-      console.error("[VisionTranslate] Could not load ElevenLabs voices:", error);
-      setReadAloudStatus(error.message);
-    } finally {
-      setIsLoadingVoices(false);
-    }
-  }
-
-  async function handleTestVoice() {
-    setIsTestingVoice(true);
-    setReadAloudStatus("");
-
-    try {
-      await ensureSettingsSaved();
-
-      const response = await sendRuntimeMessage({
-        action: "TEST_ELEVENLABS_VOICE",
-        payload: {
-          text: READ_ALOUD_TEST_TEXT,
-          language: settings.targetLanguage,
-        },
-      });
-
-      if (!response?.ok) {
-        throw new Error(response?.body?.error || "Could not generate test audio.");
-      }
-
-      if (testAudioRef.current) {
-        testAudioRef.current.pause();
-        testAudioRef.current = null;
-      }
-
-      const audio = new Audio(response.body?.audioDataUrl || "");
-      audio.onended = () => {
-        setReadAloudStatus("Preview finished.");
-      };
-      audio.onerror = () => {
-        setReadAloudStatus("Preview playback failed.");
-      };
-
-      testAudioRef.current = audio;
-      await audio.play();
-
-      setReadAloudStatus("Playing preview...");
-    } catch (error) {
-      console.error("[VisionTranslate] Could not test ElevenLabs voice:", error);
-      setReadAloudStatus(error.message);
-    } finally {
-      setIsTestingVoice(false);
-    }
-  }
-
-  if (!loaded) {
-    return (
-      <div className="popup-loading">
-        <div className="spinner" />
-        <p>Loading VisionTranslate...</p>
-      </div>
-    );
-  }
+  if (!loaded) return <div className="popup-loading"><h1>lensmu</h1>{session.loadError ? <><p role="alert">{session.loadError}</p><button className="secondary-button" onClick={session.retryLoad}>Retry loading settings</button></> : <p role="status">Loading settings…</p>}</div>;
 
   return (
     <div className="popup-container">
       <header className="popup-header">
         <div className="brand-row">
           <div className="brand-mark" aria-hidden="true">
-            VT
+            lµ
           </div>
 
           <div className="brand-copy">
-            <p className="popup-eyebrow">VisionTranslate</p>
-            <h1 className="popup-title">Image translation controls</h1>
-            <p className="popup-subtitle">
-              Keep everyday actions close, and push engine setup into its own
-              space.
-            </p>
+            <p className="popup-eyebrow">lensmu</p>
+            <h1 className="popup-title">Read the next panel.</h1>
+
           </div>
         </div>
 
@@ -679,6 +79,10 @@ export default function App() {
             key={tab.id}
             type="button"
             role="tab"
+            id={`tab-${tab.id}`}
+            aria-controls={`panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onKeyDown={switchTab}
             aria-selected={activeTab === tab.id}
             className={`tab-button ${activeTab === tab.id ? "is-active" : ""}`}
             onClick={() => setActiveTab(tab.id)}
@@ -688,7 +92,8 @@ export default function App() {
         ))}
       </nav>
 
-      <main className="popup-content">
+      {page.error || account.error ? <p className="inline-error" role="alert">{page.error || account.error}</p> : null}
+      <main className="popup-content" role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} tabIndex={0}>
         {activeTab === "home" && (
           <>
             <section className="panel-card">
@@ -697,14 +102,14 @@ export default function App() {
                   <p className="section-kicker">Quick Start</p>
                   <h2 className="section-title">Current page</h2>
                   <p className="section-description">
-                    Start here when you just want the extension ready on the
-                    page.
+                    Click an image control or translate the page below.
                   </p>
                 </div>
 
                 <div className={`status-chip status-chip--${serverStatus}`}>
                   <span className="status-dot" aria-hidden="true" />
                   <span>{serverStatusCopy[serverStatus]}</span>
+                  {["offline", "unavailable"].includes(serverStatus) && <button className="text-button" onClick={page.retryHealth}>Retry</button>}
                 </div>
               </div>
 
@@ -734,6 +139,7 @@ export default function App() {
                 onSourceChange={(value) => updateSetting("sourceLanguage", value)}
                 targetLanguage={settings.targetLanguage}
                 onTargetChange={(value) => updateSetting("targetLanguage", value)}
+                onSwap={() => session.updatePatch({sourceLanguage: settings.targetLanguage, targetLanguage: settings.sourceLanguage})}
               />
             </section>
 
@@ -741,7 +147,7 @@ export default function App() {
               <div className="section-heading">
                 <div>
                   <p className="section-kicker">Overlay Text</p>
-                  <h2 className="section-title">English overlay styling</h2>
+                  <h2 className="section-title">Translated text appearance</h2>
                   <p className="section-description">
                     Tune the translated text without opening the engine config.
                   </p>
@@ -870,7 +276,7 @@ export default function App() {
                   <p className="section-kicker">OCR</p>
                   <h2 className="section-title">Text detection engine</h2>
                   <p className="section-description">
-                    Pick the OCR path and only show the setup that engine needs.
+                    Choose how text is read from an image.
                   </p>
                 </div>
               </div>
@@ -901,8 +307,7 @@ export default function App() {
                   <p className="section-kicker">Translation</p>
                   <h2 className="section-title">Provider and model</h2>
                   <p className="section-description">
-                    Move API keys, model choices, and custom endpoints into one
-                    scan-friendly section.
+                    Choose where extracted text is translated.
                   </p>
                 </div>
               </div>
@@ -924,7 +329,7 @@ export default function App() {
                 }
                 llmModel={settings.llmModel}
                 onLlmModelChange={(value) => {
-                  setMigrationNotices([]);
+                  session.clearNotices();
                   updateSetting("llmModel", value);
                 }}
                 migrationNotices={migrationNotices}
@@ -1006,7 +411,7 @@ export default function App() {
                     </div>
                     <div className="auth-promo-copy">
                       <h2 className="auth-promo-title">
-                        Protect and save your data!
+                        Your account
                       </h2>
                       <p className="auth-promo-description">
                         Sign in for account features. Cross-device settings sync
@@ -1124,6 +529,7 @@ export default function App() {
                 <button
                   type="button"
                   className={`segment-button ${!settings.darkMode ? "is-active" : ""}`}
+                  aria-pressed={!settings.darkMode}
                   onClick={() => updateSetting("darkMode", false)}
                 >
                   Light
@@ -1131,6 +537,7 @@ export default function App() {
                 <button
                   type="button"
                   className={`segment-button ${settings.darkMode ? "is-active" : ""}`}
+                  aria-pressed={settings.darkMode}
                   onClick={() => updateSetting("darkMode", true)}
                 >
                   Dark
@@ -1181,14 +588,10 @@ export default function App() {
 
         {saveError ? (
           <p className="footer-note footer-note--error" role="alert">
-            Settings were not saved: {saveError}
+            Settings were not saved: {saveError} <button className="text-button" onClick={() => session.ensureSaved().catch(() => undefined)}>Retry save</button>
           </p>
         ) : (
-          <p className="footer-note">
-            {!tabState.active
-              ? "Page controls will be enabled automatically before translation."
-              : "Runs on the current tab with your current engine settings."}
-          </p>
+          <p className="footer-note" role="status">{session.saveState.status === "saving" ? "Saving settings…" : "Settings saved on this device."}</p>
         )}
       </footer>
     </div>

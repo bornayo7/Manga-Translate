@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="860" viewBox="0 0 720 860" role="img" aria-labelledby="title desc">
+<title id="title">The last train — an original lensmu illustration</title><desc id="desc">Two friends wait at a mountain station at dusk and decide to explore the town beyond the next stop.</desc>
+<defs><pattern id="hatch" width="9" height="9" patternUnits="userSpaceOnUse"><path d="M0 9L9 0" stroke="#20304a" stroke-opacity=".14"/></pattern></defs>
+<rect width="720" height="860" fill="#fff"/>
+<g stroke="#20304a" stroke-width="5" stroke-linejoin="round"><path d="M18 18H702V545H18Z" fill="#f1f4fa"/><path d="M18 565H702V842H18Z" fill="#fff"/>
+<circle cx="570" cy="128" r="48" fill="#fff"/><path d="M20 356L168 189 292 334 391 207 585 375 702 260V540H18Z" fill="#dce4f3"/><path d="M18 434L197 303 332 457 511 313 702 421V545H18Z" fill="url(#hatch)"/>
+<path d="M18 486L702 474M18 513L702 506" fill="none"/>
+<path d="M84 540V322M67 327H300M294 327V540" fill="none"/><path d="M52 320L185 270 319 320Z" fill="#20304a"/>
+<rect x="208" y="349" width="69" height="38" rx="3" fill="#fff"/><path d="M213 361H270M230 350V386" stroke-width="2"/>
+<path d="M344 503V432Q344 417 360 417H601Q634 419 656 444L684 477V509Z" fill="#fff"/><path d="M357 448H650M359 478H677" stroke="#3157c8" stroke-width="7"/>
+<path d="M376 425H413V445H376ZM430 425H467V445H430ZM484 425H521V445H484ZM538 425H575V445H538Z" fill="#dce4f3"/>
+<circle cx="397" cy="509" r="13" fill="#20304a"/><circle cx="634" cy="509" r="13" fill="#20304a"/>
+<path d="M177 758V701Q177 678 200 678H218Q242 682 242 706V758M189 757L184 823M229 757L235 823" fill="#3157c8"/><circle cx="209" cy="652" r="28" fill="#fff"/><path d="M180 650Q179 610 214 620Q243 620 239 646L217 630 205 648Z" fill="#20304a"/>
+<path d="M280 761V696Q280 675 300 675H317Q341 678 342 701V761M290 760L288 823M330 760L338 823" fill="#dce4f3"/><circle cx="311" cy="648" r="27" fill="#fff"/><path d="M282 650Q277 613 309 616Q344 616 341 652L324 635 305 642Z" fill="#20304a"/>
+<path d="M20 799L146 737M346 801H701" fill="none" stroke-width="2"/>
+<path d="M45 49H343V174H236L214 197 213 174H45Z" fill="#fff"/><path d="M376 605H670V742H402L365 770 376 722Z" fill="#fff"/>
+</g>
+<g fill="#20304a" font-family="Noto Sans CJK JP, Yu Gothic, Meiryo, sans-serif" font-size="25" font-weight="600" text-anchor="middle"><text x="194" y="100">次の駅で</text><text x="194" y="137">降りよう。</text><text x="523" y="658">新しい町を</text><text x="523" y="697">見てみたい。</text></g>
+</svg>

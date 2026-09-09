@@ -1,113 +1,45 @@
-# VisionTranslate Website
+# lensmu website
 
-Marketing website for VisionTranslate. The site presents the browser extension,
-explains the OCR and translation workflow, embeds a product showcase video,
-introduces the engineering team, provides a contact form for business
-inquiries, and hosts a limited in-browser translation demo at `/translate`.
-It also includes a persistent light/dark theme toggle and an optional
-Auth0-backed preferences API that only activates when its environment
-variables are set.
+The website introduces the Chrome extension, provides a local installation guide at `/install`, and hosts a deliberately limited image translator at `/translate`. The comic in the home page and demo is original SVG artwork with a prepared translation; switching it makes no provider request.
 
-## Tech Stack
+## Run
 
-- Next.js 16 with the App Router
-- TypeScript
-- Tailwind CSS
-- shadcn/ui-style local components
-- Auth0 (`@auth0/nextjs-auth0`, optional) for sign-in and the preferences API
-- Responsive desktop and mobile layout
+Use Node.js 20.19 or newer (the same baseline as the extension and CI).
 
-## File Structure
-
-```txt
-website/
-  app/
-    about/page.tsx
-    api/preferences/route.ts   GET/PUT synced preferences (Auth0-gated)
-    contact/page.tsx
-    translate/page.tsx         limited in-browser demo
-    globals.css
-    layout.tsx
-    page.tsx
-  components/
-    auth/
-      AppAuthProvider.tsx
-      AuthButtons.tsx
-    layout/
-      BrandLogo.tsx
-      Footer.tsx
-      Navbar.tsx
-    sections/
-      AboutSection.tsx
-      ContactSection.tsx
-      DemoSection.tsx
-      Hero.tsx
-      HowItWorksSection.tsx
-      TeamSection.tsx
-      TranslatorSection.tsx
-      UseCasesSection.tsx
-    ui/
-      badge.tsx
-      button.tsx
-      card.tsx
-      input.tsx
-      label.tsx
-      reveal-on-scroll.tsx
-      textarea.tsx
-  data/
-    site.ts                    copy, team, links
-  lib/
-    api-auth.ts                bearer-token / session auth for the API
-    auth0.ts                   Auth0 client, enabled only with env vars
-    extension-cors.ts          CORS allowlist for the extension origin
-    preferences-schema.ts      zod schema mirroring ../extension/shared/preferences.js
-    preferences-store.ts       Auth0 user_metadata read/write
-    translator.ts              demo pipeline: backend OCR -> MyMemory -> canvas
-    utils.ts
-  proxy.ts                     Next.js middleware wrapping Auth0
-  .env.example
-  components.json
-  eslint.config.mjs
-  next.config.mjs
-  package.json
-  postcss.config.mjs
-  tailwind.config.ts
-  tsconfig.json
-```
-
-The preferences schema imports the canonical defaults from
-`../extension/shared/preferences.js`, so the website and the extension cannot
-drift apart on what a preference is called or what its default is.
-
-## Setup
-
-```bash
+```sh
 cd lensmu/website
-npm install
+npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser.
+Open `http://localhost:3000`. Public pages do not require Auth0. Sign-in and the preferences API activate only with the server configuration described in `.env.example`. Cross-device extension sync is not enabled in this build.
 
-Node.js 20.9 or newer is required.
+## Image demo
 
-Auth0 sign-in and the `/api/preferences` route are off until the variables in
-`.env.example` are provided in `.env.local`; the public pages work without
-them. The `/translate` demo needs the Python backend running on
-`http://localhost:8000` (see `../backend/README.md`).
+Follow `../backend/README.md` to install a supported OCR profile and start the backend. The default OCR address is `http://localhost:8000`; a different local port can be entered under Local OCR server address. Configure the backend CORS allowlist if this website is served from another origin.
 
-## Build
+The browser sends image pixels to that backend and extracted text to MyMemory. The demo supports JPG, PNG and WEBP up to 10 MB, 16 megapixels, and 16,384 pixels on either side. It provides cancellation, per-region progress, original/translated comparison, PNG download, and a readable transcript. Regions that cannot fit retain their original pixels; zero-render results are errors. MangaOCR requires Japanese input. No API keys are collected by the demo.
 
-```bash
+## Ownership
+
+- `lib/translator.ts`: one cancellable request, composing image decoding, OCR, translation and rendering.
+- `lib/image-input.ts`: file validation, image decoding and local read cleanup.
+- `lib/demo-ocr.ts`: HTTP adapter for the shared runtime OCR response contract and Manga region batching.
+- `lib/demo-translation.ts`: bounded MyMemory requests using the extension's canonical translation rules.
+- `lib/image-renderer.ts`: canvas adapter consuming the shared display plan, with explicit region outcomes.
+- `lib/translation-session.js`: accepts only the current request's events and owns output URL lifetime.
+- `lib/preferences-schema.ts`: Zod adapter around the extension's canonical preference validator.
+- `app/layout.tsx`: persistent navigation/auth/theme shell; individual routes own their main content.
+
+## Verify
+
+```sh
+npm test
 npm run lint
 npm run typecheck
 npm run build
-npm run start
 ```
 
-## Customization
+The tests cover real Jose error mapping, the production TypeScript OCR/render interfaces, cancellation and URL cleanup. `lib/test-import.mjs` compiles production TypeScript in memory with the existing compiler, so tests work on CI Node 20 without another runtime dependency. Tests using controlled adapters do not establish real OCR/provider availability; record live browser results separately.
 
-- Update team members, use cases, features, and links in `data/site.ts`.
-- The product tour in `components/sections/DemoSection.tsx` is a YouTube embed;
-  swap the video ID there.
-- Update the contact links in `data/site.ts`.
+Fonts use named local/system fallbacks. The site does not download fonts or load stock image/CDN assets for its main demonstration. The contact form opens an email draft for the user to send; it does not claim to send a message itself.

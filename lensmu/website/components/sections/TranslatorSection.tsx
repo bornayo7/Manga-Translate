@@ -1,459 +1,114 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
-import {
-  Upload,
-  FileImage,
-  Languages,
-  Wand2,
-  RefreshCcw,
-  CheckCircle2,
-  AlertCircle,
-  X,
-  Download
-} from "lucide-react";
-import Image from "next/image";
+import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { translateImage, type OcrEngine } from '@/lib/translator';
+import { validateImageFile } from '@/lib/image-input';
+import { createTranslationSession, type DemoState } from '@/lib/translation-session.js';
+import { PanelSample } from './PanelSample';
 
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
-import { translateImage, type ProcessState, type OcrEngine } from "@/lib/translator";
-
-const LANGUAGES = [
-  { id: "en", name: "English" },
-  { id: "es", name: "Spanish" },
-  { id: "fr", name: "French" },
-  { id: "ja", name: "Japanese" },
-  { id: "zh", name: "Chinese" },
-  { id: "ko", name: "Korean" },
-  { id: "de", name: "German" },
-];
-
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const SUPPORTED_IMAGE_NAME = /\.(jpe?g|png|webp)$/i;
-
-function isSupportedImage(file: File) {
-  return ["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
-    (!file.type && SUPPORTED_IMAGE_NAME.test(file.name));
-}
+const LANGUAGES = [['ja','Japanese'],['en','English'],['es','Spanish'],['fr','French'],['zh','Chinese'],['ko','Korean'],['de','German']];
+const INITIAL: DemoState = {phase:'idle',detail:'',error:'',result:null};
 
 export function TranslatorSection() {
-  const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [processState, setProcessState] = useState<ProcessState>("idle");
-  
-  // Settings state — default source to Japanese because our pipeline
-  // can't auto-detect script; the user needs to pick which language
-  // model PaddleOCR loads.
-  const [sourceLang, setSourceLang] = useState("ja");
-  const [targetLang, setTargetLang] = useState("en");
-  const [ocrEngine, setOcrEngine] = useState<OcrEngine>("paddleocr");
-  // Result state
-  const [resultUrl, setResultUrl] = useState<string | null>(null);
-  const [resultBlob, setResultBlob] = useState<Blob | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [resultWarnings, setResultWarnings] = useState<string[]>([]);
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleFile = useCallback((uploadedFile: File) => {
-    if (!isSupportedImage(uploadedFile)) {
-      setErrorMessage("Choose a JPG, PNG, or WEBP image. PDF support is not available in this demo.");
-      return;
-    }
-
-    if (uploadedFile.size > MAX_IMAGE_BYTES) {
-      setErrorMessage("That image is larger than 10 MB. Choose a smaller file and try again.");
-      return;
-    }
-
-    setErrorMessage(null);
-    setFile(uploadedFile);
-    setPreviewUrl(URL.createObjectURL(uploadedFile));
-    setResultUrl(null);
-    setResultBlob(null);
-    setResultWarnings([]);
-    setProcessState("idle");
-  }, []);
-
-  // Release object URLs on unmount / reset to avoid leaks
+  const [preview, setPreview] = useState('');
+  const [sourceLang, setSourceLang] = useState('ja');
+  const [targetLang, setTargetLang] = useState('en');
+  const [ocrEngine, setOcrEngine] = useState<OcrEngine>('paddleocr');
+  const [backendUrl, setBackendUrl] = useState('http://localhost:8000');
+  const [state, setState] = useState<DemoState>(INITIAL);
+  const [inputError, setInputError] = useState('');
+  const [showOriginal, setShowOriginal] = useState(false);
+  const resultHeading = useRef<HTMLHeadingElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const session = useRef<ReturnType<typeof createTranslationSession> | null>(null);
   useEffect(() => {
-    return () => {
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-    };
-  }, [resultUrl]);
-
-  useEffect(() => {
-    return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    };
-  }, [previewUrl]);
-
-  const handleDrag = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
-      setDragActive(true);
-    } else if (e.type === "dragleave") {
-      setDragActive(false);
-    }
+    session.current = createTranslationSession({translate: translateImage, publish: setState});
+    return () => { session.current?.dispose(); session.current = null; };
   }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFile(e.dataTransfer.files[0]);
-    }
-  }, [handleFile]);
-
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    e.preventDefault();
-    if (e.target.files && e.target.files[0]) {
-      handleFile(e.target.files[0]);
-    }
-  };
-
-  const clearFile = () => {
-    setFile(null);
-    setPreviewUrl(null);
-    setResultUrl(null);
-    setResultBlob(null);
-    setErrorMessage(null);
-    setProcessState("idle");
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
-
-  const startTranslation = async () => {
-    if (!file) return;
-
-    setErrorMessage(null);
-
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+  useEffect(() => { if (state.phase === 'done' || state.phase === 'error') resultHeading.current?.focus(); }, [state.phase]);
+  const busy = !['idle','done','error'].includes(state.phase);
+  const result = state.result;
+  function selectFile(next: File) {
     try {
-      const result = await translateImage({
-        file,
-        ocrEngine,
-        sourceLang,
-        targetLang,
-        onProgress: (state) => setProcessState(state),
-      });
-      setResultBlob(result.blob);
-      setResultUrl(result.url);
-      setResultWarnings(result.warnings);
-      setProcessState("done");
-    } catch (err) {
-      console.error("[translator] pipeline failed:", err);
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      setProcessState("error");
-    }
-  };
-
-  const downloadResult = () => {
-    if (!resultBlob || !file) return;
-    const a = document.createElement("a");
-    const baseName = file.name.replace(/\.[^.]+$/, "") || "translated";
-    a.href = resultUrl ?? URL.createObjectURL(resultBlob);
-    a.download = `${baseName}-translated.png`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  };
-
-  return (
-    <section className="bg-background section-padding min-h-screen pt-24 md:pt-32">
-      <div className="section-shell">
-        <div className="mx-auto max-w-3xl text-center mb-12">
-          <p className="eyebrow">Image Translator Demo</p>
-          <h1 className="mt-3 text-4xl font-bold leading-tight sm:text-5xl">
-            Translate text inside an image.
-          </h1>
-          <p className="mt-5 text-lg text-muted-foreground max-w-2xl mx-auto">
-            Upload a screenshot, manga panel, or photo. This limited demo uses
-            your local OCR backend and MyMemory, then redraws the result in place.
-          </p>
+      validateImageFile(next);
+      session.current?.cancel();
+      setFile(next); setPreview(URL.createObjectURL(next)); setInputError(''); setState(INITIAL); setShowOriginal(false);
+    } catch (error) { setInputError((error as Error).message); }
+  }
+  function reset() {
+    session.current?.cancel(); setFile(null); setPreview(''); setState(INITIAL); setInputError('');
+    if (fileInput.current) fileInput.current.value = '';
+    fileInput.current?.focus();
+  }
+  return <section className="reading-section demo-section">
+    <div className="section-shell">
+      <header className="page-intro">
+        <h1>Make the image readable.</h1>
+        <p>Try an illustrated sample below, or translate a JPG, PNG, or WEBP with your local OCR backend. Extracted text is sent to MyMemory.</p>
+        <Link href="/install#local-demo" className="text-link">Set up the local demo</Link>
+      </header>
+      <div className="demo-workspace">
+        <div className="demo-image-column">
+          {file && preview ? <figure className="image-sheet">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={result && !showOriginal ? result.url : preview} alt={result && !showOriginal ? 'Image with translated text. Read the transcript below for text content.' : 'Original uploaded image'} />
+            <figcaption>{result && !showOriginal ? `${result.rendered} regions redrawn; ${result.skipped} unchanged.` : file.name}</figcaption>
+          </figure> : <PanelSample />}
+          {result ? <div className="comparison-controls" role="group" aria-label="Image view">
+            <button aria-pressed={showOriginal} onClick={() => setShowOriginal(true)}>Original</button>
+            <button aria-pressed={!showOriginal} onClick={() => setShowOriginal(false)}>Translation</button>
+          </div> : null}
         </div>
-
-        <div className="mx-auto max-w-4xl">
-          {!file ? (
-            <Card
-              className={cn(
-                "relative flex flex-col items-center justify-center p-12 text-center border-2 border-dashed transition-colors",
-                dragActive ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50 hover:border-primary/50",
-                "min-h-[400px] rounded-2xl shadow-sm"
-              )}
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                accept="image/jpeg,image/png,image/webp"
-                onChange={handleChange}
-              />
-              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary/10 mb-6">
-                <Upload className="h-10 w-10 text-primary" />
-              </div>
-              <h3 className="text-xl font-semibold mb-2">Drag & Drop your file here</h3>
-              <p className="text-muted-foreground mb-8">
-                Supports JPG, PNG, and WEBP up to 10 MB
-              </p>
-              {errorMessage ? (
-                <p className="mb-6 max-w-md text-sm text-destructive" role="alert">
-                  {errorMessage}
-                </p>
-              ) : null}
-              <Button size="lg" className="rounded-full px-8 shadow-sm" onClick={() => fileInputRef.current?.click()}>
-                Browse Files
-              </Button>
-            </Card>
-          ) : (
-            <div className="grid gap-8 lg:grid-cols-2">
-              {/* Left Column: File Preview */}
-              <div className="flex flex-col">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold text-lg flex items-center gap-2">
-                    <FileImage className="h-5 w-5 text-primary" />
-                    Original Image
-                  </h3>
-                  {processState === "idle" && (
-                    <Button variant="ghost" size="sm" onClick={clearFile} className="h-8 text-muted-foreground hover:text-destructive">
-                      <X className="h-4 w-4 mr-1" /> Remove
-                    </Button>
-                  )}
-                </div>
-                
-                <Card className="flex-1 overflow-hidden bg-muted/30 border-border relative min-h-[300px] lg:min-h-[500px] flex items-center justify-center">
-                  {previewUrl ? (
-                    <Image 
-                      src={previewUrl} 
-                      alt="Upload preview" 
-                      fill 
-                      className={cn("object-contain p-4", processState !== "idle" && processState !== "done" && "opacity-50")}
-                    />
-                  ) : null}
-                  
-                  {/* Scanning Overlay Effect */}
-                  {processState === "scanning" && (
-                    <div className="absolute inset-0 pointer-events-none">
-                      <div className="w-full h-1 bg-primary/80 shadow-[0_0_15px_rgba(var(--primary),0.5)] animate-scan" />
-                    </div>
-                  )}
-                </Card>
-              </div>
-
-              {/* Right Column: Settings & Result */}
-              <div className="flex flex-col">
-                {processState === "idle" ? (
-                  <Card className="flex-1 p-6 md:p-8 flex flex-col justify-center border-border shadow-sm">
-                    <h3 className="text-xl font-bold mb-6">Translation Settings</h3>
-                    
-                    <div className="space-y-5">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label className="text-sm font-medium" htmlFor="source-lang">Source Language</Label>
-                          <select
-                            id="source-lang"
-                            value={sourceLang}
-                            onChange={(e) => setSourceLang(e.target.value)}
-                            className="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {LANGUAGES.map((lang) => (
-                              <option key={lang.id} value={lang.id}>{lang.name}</option>
-                            ))}
-                          </select>
-                          <p className="text-[11px] text-muted-foreground">
-                            Pick the language of the text in the image.
-                          </p>
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-sm font-medium" htmlFor="target-lang">Target Language</Label>
-                          <select
-                            id="target-lang"
-                            value={targetLang}
-                            onChange={(e) => setTargetLang(e.target.value)}
-                            className="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {LANGUAGES.map((lang) => (
-                              <option key={lang.id} value={lang.id}>{lang.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label className="text-sm font-medium" htmlFor="ocr-engine">OCR Engine</Label>
-                        <select
-                          id="ocr-engine"
-                          value={ocrEngine}
-                          onChange={(e) => setOcrEngine(e.target.value as OcrEngine)}
-                          className="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          <option value="paddleocr">PaddleOCR (any language — pick it in Source below)</option>
-                          <option value="mangaocr">MangaOCR (Japanese manga only)</option>
-                        </select>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Requires the local backend at{" "}
-                          <code className="text-foreground">http://localhost:8000</code>.
-                          {ocrEngine === "mangaocr" && (
-                            <> MangaOCR is Japanese-only — use PaddleOCR for other languages.</>
-                          )}
-                        </p>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label className="text-sm font-medium">Translation Engine</Label>
-                        <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                          Using <span className="font-medium text-foreground">MyMemory</span> (free, no key required). LLM providers are available in the browser extension.
-                        </div>
-                      </div>
-
-                      <div className="pt-2 border-t border-border/50">
-                        <Button size="lg" className="w-full rounded-full shadow-md h-12 text-base" onClick={startTranslation}>
-                          <Wand2 className="mr-2 h-5 w-5" />
-                          Translate Image
-                        </Button>
-                      </div>
-                    </div>
-                  </Card>
-                ) : processState === "done" && resultUrl ? (
-                  <div className="flex flex-col h-full">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-semibold text-lg flex items-center gap-2 text-green-600 dark:text-green-500">
-                        <CheckCircle2 className="h-5 w-5" />
-                        Translation Complete
-                      </h3>
-                      <Button variant="ghost" size="sm" onClick={clearFile} className="h-8 text-muted-foreground">
-                        <RefreshCcw className="h-4 w-4 mr-1" /> Translate Another
-                      </Button>
-                    </div>
-
-                    <Card className="flex-1 overflow-hidden bg-muted/30 border-border relative min-h-[300px] lg:min-h-[500px] flex items-center justify-center">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={resultUrl}
-                        alt="Translated result"
-                        className="h-full w-full object-contain p-4"
-                      />
-                    </Card>
-
-                    {resultWarnings.length > 0 ? (
-                      <ul className="mt-4 space-y-1 rounded-md border border-amber-300/60 bg-amber-50 p-3 text-xs text-amber-900" role="status">
-                        {resultWarnings.map((warning) => (
-                          <li key={warning}>{warning}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-
-                    <Button
-                      size="lg"
-                      onClick={downloadResult}
-                      className="mt-4 w-full rounded-full bg-green-600 hover:bg-green-700 text-white border-0 shadow-md"
-                    >
-                      <Download className="h-5 w-5 mr-2" />
-                      Download Translated Image
-                    </Button>
-                  </div>
-                ) : processState === "error" ? (
-                  <div className="flex flex-col h-full">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-semibold text-lg flex items-center gap-2 text-destructive">
-                        <AlertCircle className="h-5 w-5" />
-                        Translation Failed
-                      </h3>
-                      <Button variant="ghost" size="sm" onClick={clearFile} className="h-8 text-muted-foreground">
-                        <RefreshCcw className="h-4 w-4 mr-1" /> Start Over
-                      </Button>
-                    </div>
-
-                    <Card className="flex-1 p-8 flex flex-col items-center justify-center text-center border-destructive/40 bg-destructive/5">
-                      <div className="h-16 w-16 bg-destructive/10 rounded-full flex items-center justify-center mb-6">
-                        <AlertCircle className="h-8 w-8 text-destructive" />
-                      </div>
-                      <h4 className="text-lg font-semibold mb-2">Something went wrong</h4>
-                      <p className="text-sm text-muted-foreground max-w-md whitespace-pre-wrap">
-                        {errorMessage ?? "Unknown error"}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-6 max-w-md">
-                        Make sure the Python backend is running at{" "}
-                        <code className="text-foreground">http://localhost:8000</code>{" "}
-                        (<code className="text-foreground">python server.py</code> in{" "}
-                        <code className="text-foreground">backend/</code>).
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="mt-6"
-                        onClick={() => {
-                          setErrorMessage(null);
-                          setProcessState("idle");
-                        }}
-                      >
-                        Try Again
-                      </Button>
-                    </Card>
-                  </div>
-                ) : (
-                  <Card className="flex-1 p-8 flex flex-col items-center justify-center text-center border-border shadow-sm">
-                    <div className="relative h-24 w-24 mb-8">
-                      <div className="absolute inset-0 border-4 border-primary/20 rounded-full" />
-                      <div className="absolute inset-0 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <Languages className="h-8 w-8 text-primary animate-pulse" />
-                      </div>
-                    </div>
-                    
-                    <h3 className="text-xl font-bold mb-2">
-                      {processState === "uploading" && "Preparing your image..."}
-                      {processState === "scanning" && "Running OCR extraction..."}
-                      {processState === "translating" && "Translating context..."}
-                      {processState === "rendering" && "Redrawing on the image..."}
-                    </h3>
-                    
-                    <p className="text-muted-foreground text-sm max-w-[250px]">
-                      {processState === "uploading" && "Reading image pixels in your browser."}
-                      {processState === "scanning" && "Your local OCR backend is detecting text regions."}
-                      {processState === "translating" && "Sending extracted text to the MyMemory translation service."}
-                      {processState === "rendering" && "Stitching translated text back into the original visual layout."}
-                    </p>
-
-                    <div className="w-full max-w-xs bg-muted rounded-full h-2 mt-8 overflow-hidden">
-                      <div 
-                        className="bg-primary h-full transition-all duration-500 ease-out rounded-full"
-                        style={{ 
-                          width: processState === "uploading" ? "25%" : 
-                                 processState === "scanning" ? "50%" : 
-                                 processState === "translating" ? "75%" : "95%" 
-                        }}
-                      />
-                    </div>
-                  </Card>
-                )}
-              </div>
+        <div className="demo-controls">
+          <div className="upload-field" onDragOver={(event)=>event.preventDefault()} onDrop={(event)=>{ event.preventDefault(); if (!busy && event.dataTransfer.files[0]) selectFile(event.dataTransfer.files[0]); }}>
+            <label htmlFor="image-file">Choose your image</label>
+            <input id="image-file" ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(event)=>{ if (event.target.files?.[0]) selectFile(event.target.files[0]); }} aria-describedby="image-limits" />
+            <p id="image-limits">Drop a file here, or browse. Up to 10 MB, 16 megapixels, and 16,384 pixels on either side.</p>
+          </div>
+          {inputError ? <p className="error-note" role="alert">{inputError}</p> : null}
+          <fieldset disabled={busy} className="demo-settings">
+            <legend>Translation direction</legend>
+            <div className="language-pair">
+              <label htmlFor="source-lang">Source<select id="source-lang" value={sourceLang} onChange={(event)=>setSourceLang(event.target.value)}>
+                {LANGUAGES.map(([id,name])=><option key={id} value={id} disabled={ocrEngine==='mangaocr' && id!=='ja'}>{name}</option>)}
+              </select></label>
+              <label htmlFor="target-lang">Translate to<select id="target-lang" value={targetLang} onChange={(event)=>setTargetLang(event.target.value)}>
+                {LANGUAGES.map(([id,name])=><option key={id} value={id}>{name}</option>)}
+              </select></label>
             </div>
-          )}
+            <label htmlFor="ocr-engine">Read text with<select id="ocr-engine" value={ocrEngine} onChange={(event)=>setOcrEngine(event.target.value as OcrEngine)}>
+              <option value="paddleocr">PaddleOCR</option>
+              <option value="mangaocr" disabled={sourceLang!=='ja'}>MangaOCR · Japanese only</option>
+            </select></label>
+            <p className="field-note">OCR runs on your local backend (port 8000 by default). Translation uses the free MyMemory service, which has a limited daily quota. The extension also supports other engines and providers.</p>
+            <details><summary>Local OCR server address</summary><label htmlFor="backend-address">Server URL<input id="backend-address" className="server-address" type="url" value={backendUrl} onChange={(event)=>setBackendUrl(event.target.value)} /></label><p className="field-note">Image pixels are sent to this address. Change it if your local backend uses another port.</p></details>
+          </fieldset>
+          {busy ? <button className="action-button secondary-action" onClick={()=>session.current?.cancel()}>Cancel translation</button> : <button className="action-button" disabled={!file} onClick={()=>{ if (file) { setShowOriginal(false); void session.current?.run({file,ocrEngine,sourceLang,targetLang,backendUrl}); } }}>Translate image</button>}
+          <div className="request-status" role="status" aria-live="polite" aria-atomic="true">
+            {busy ? <><span className="status-mark" aria-hidden="true" />{state.detail || 'Translating…'}</> : state.phase==='idle' ? state.detail : null}
+          </div>
+          {state.phase==='error' ? <div className="error-note"><h2 ref={resultHeading} tabIndex={-1}>Translation did not complete</h2><p>{state.error}</p><p>Check the language and local backend, then try again. Your image is still selected.</p></div> : null}
+          {result ? <div className="result-summary">
+            <h2 ref={resultHeading} tabIndex={-1}>{result.skipped ? 'Partially translated' : 'Translation ready'}</h2>
+            <p>{state.detail}. {LANGUAGES.find(([id])=>id===result.sourceLang)?.[1]} → {LANGUAGES.find(([id])=>id===result.targetLang)?.[1]}.</p>
+            {result.warnings.length ? <ul>{result.warnings.map((warning,index)=><li key={index}>{warning}</li>)}</ul> : null}
+            <a className="action-button" href={result.url} download={`${file?.name.replace(/\.[^.]+$/,'') || 'image'}-translated.png`}>Download translated PNG</a>
+          </div> : null}
+          {file && !busy ? <button className="text-link plain-button" onClick={reset}>Choose another image</button> : null}
         </div>
       </div>
-      
-      <style dangerouslySetInnerHTML={{__html: `
-        @keyframes scan {
-          0% { top: 0; opacity: 0; }
-          10% { opacity: 1; }
-          90% { opacity: 1; }
-          100% { top: 100%; opacity: 0; }
-        }
-        .animate-scan {
-          position: absolute;
-          animation: scan 2.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-        }
-      `}} />
-    </section>
-  );
+      {result ? <section className="transcript" aria-labelledby="transcript-heading">
+        <h2 id="transcript-heading">Readable transcript</h2>
+        <p>Every recognized region is included, including translations that could not fit in the image.</p>
+        <ol>{result.blocks.map((block,index)=><li key={index}>
+          <p lang={result.sourceLang} className="source-text">{block.text}</p>
+          {result.translations[index] ? <p lang={result.targetLang}>{result.translations[index]}</p> : <p className="error-note">No usable translation returned.</p>}
+          {result.regions[index]?.status==='skipped' ? <p className="field-note">Original image region kept: {result.regions[index].reason==='translation-failed' ? 'translation failed' : result.regions[index].reason==='too-small' ? 'region too small' : 'translation does not fit'}.</p> : null}
+        </li>)}</ol>
+      </section> : null}
+    </div>
+  </section>;
 }

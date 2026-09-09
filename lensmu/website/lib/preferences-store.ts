@@ -61,12 +61,14 @@ function buildEmptyEnvelope(): StoredPreferenceEnvelope {
 }
 
 function normalizeStoredEnvelope(input: unknown): PreferenceStoreResult {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
+  if (input === undefined || input === null) {
     return {
       hasStoredPreferences: false,
       envelope: buildEmptyEnvelope(),
     };
   }
+
+  if (typeof input !== "object" || Array.isArray(input)) throw new Error("Stored preferences are not a valid envelope.");
 
   const rawEnvelope = input as {
     schemaVersion?: number;
@@ -81,11 +83,8 @@ function normalizeStoredEnvelope(input: unknown): PreferenceStoreResult {
       : null;
   const storedSchemaVersion = Number(rawEnvelope.schemaVersion || 1);
 
-  if (!rawPreferences || storedSchemaVersion > PREFERENCE_SCHEMA_VERSION) {
-    return {
-      hasStoredPreferences: false,
-      envelope: buildEmptyEnvelope(),
-    };
+  if (!rawPreferences || !Number.isInteger(storedSchemaVersion) || storedSchemaVersion < 1 || storedSchemaVersion > PREFERENCE_SCHEMA_VERSION) {
+    throw new Error("Stored preference version cannot be read by this application.");
   }
 
   const parsedPreferences = syncedPreferencesSchema.safeParse({
@@ -93,12 +92,7 @@ function normalizeStoredEnvelope(input: unknown): PreferenceStoreResult {
     ...rawPreferences,
   });
 
-  if (!parsedPreferences.success) {
-    return {
-      hasStoredPreferences: false,
-      envelope: buildEmptyEnvelope(),
-    };
-  }
+  if (!parsedPreferences.success) throw new Error("Stored preferences failed validation and were preserved.");
 
   return {
     hasStoredPreferences: true,

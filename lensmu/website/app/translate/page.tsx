@@ -1,10 +1,8 @@
 import { Metadata } from "next";
-import { Footer } from "@/components/layout/Footer";
-import { Navbar } from "@/components/layout/Navbar";
 import { TranslatorSection } from "@/components/sections/TranslatorSection";
 
 export const metadata: Metadata = {
-  title: "Image Translator Demo | VisionTranslate",
+  title: "Image Translator Demo | lensmu",
   description:
     "Upload a JPG, PNG, or WEBP image, detect text with your local OCR backend, and redraw the translated result."
 };
@@ -12,11 +10,9 @@ export const metadata: Metadata = {
 export default function TranslatePage() {
   return (
     <>
-      <Navbar />
-      <main>
+      <main id="main-content">
         <TranslatorSection />
       </main>
-      <Footer />
     </>
   );
 }

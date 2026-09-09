@@ -186,7 +186,7 @@ export default function ReadAloudSettings({
             </div>
 
             {voicesStatus ? (
-              <p className="inline-status">{voicesStatus}</p>
+              <p className="inline-status" role="status">{voicesStatus}</p>
             ) : (
               <p className="form-hint">
                 Use the stored key only. The extension sends speech requests from

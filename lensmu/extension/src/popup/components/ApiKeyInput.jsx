@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 
 export default function ApiKeyInput({
   label,
@@ -8,16 +8,6 @@ export default function ApiKeyInput({
   onChange,
 }) {
   const [visible, setVisible] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    if (!saved) {
-      return undefined;
-    }
-
-    const timeoutId = window.setTimeout(() => setSaved(false), 1200);
-    return () => window.clearTimeout(timeoutId);
-  }, [saved]);
 
   function getMaskedValue(input) {
     if (!input || input.length <= 4) {
@@ -29,7 +19,6 @@ export default function ApiKeyInput({
 
   function handleChange(event) {
     onChange(event.target.value);
-    setSaved(true);
   }
 
   const inputId = `${storageKey}-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -40,7 +29,6 @@ export default function ApiKeyInput({
         <label className="api-key-label" htmlFor={inputId}>
           {label}
         </label>
-        {saved ? <span className="api-key-saved">Saved</span> : null}
       </div>
 
       <div className="api-key-field">
@@ -66,7 +54,7 @@ export default function ApiKeyInput({
       </div>
 
       {value && value.length > 4 && !visible ? (
-        <div className="api-key-preview">Stored: {getMaskedValue(value)}</div>
+        <div className="api-key-preview">Key ending in {getMaskedValue(value).slice(-4)}</div>
       ) : null}
     </div>
   );

@@ -53,11 +53,13 @@ export function ContactSection() {
     setErrors(nextErrors);
 
     if (Object.keys(nextErrors).length > 0) {
+      const field = event.currentTarget.elements.namedItem(Object.keys(nextErrors)[0]);
+      if (field instanceof HTMLElement) field.focus();
       setSuccess(false);
       return;
     }
 
-    const subject = encodeURIComponent(`VisionTranslate inquiry from ${form.name.trim()}`);
+    const subject = encodeURIComponent(`lensmu inquiry from ${form.name.trim()}`);
     const body = encodeURIComponent(
       `Name: ${form.name.trim()}\nEmail: ${form.email.trim()}\n\n${form.message.trim()}`
     );
@@ -79,13 +81,11 @@ export function ContactSection() {
         <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr]">
           <div>
             <p className="eyebrow">Contact</p>
-            <h2 className="mt-3 max-w-xl text-3xl font-bold leading-tight sm:text-4xl">
-              Get in touch with VisionTranslate
-            </h2>
+            <h1 className="mt-3 max-w-xl text-3xl font-bold leading-tight sm:text-4xl">
+              Get in touch with lensmu
+            </h1>
             <p className="mt-5 max-w-xl text-base leading-8 text-muted-foreground">
-              Send a message for business inquiries, collaboration, or product
-              questions. We&apos;re building the future of in-context visual
-              translation.
+              Have a product question or feedback? Prepare an email below. Your email app opens the draft; you send it from there.
             </p>
 
             <div className="mt-8 grid gap-3">
@@ -114,9 +114,10 @@ export function ContactSection() {
                     value={form.name}
                     onChange={(event) => updateField("name", event.target.value)}
                     aria-invalid={Boolean(errors.name)}
+                    aria-describedby={errors.name ? "name-error" : undefined}
                   />
                   {errors.name ? (
-                    <p className="text-sm text-secondary">{errors.name}</p>
+                    <p id="name-error" className="text-sm text-destructive">{errors.name}</p>
                   ) : null}
                 </div>
 
@@ -130,9 +131,10 @@ export function ContactSection() {
                     value={form.email}
                     onChange={(event) => updateField("email", event.target.value)}
                     aria-invalid={Boolean(errors.email)}
+                    aria-describedby={errors.email ? "email-error" : undefined}
                   />
                   {errors.email ? (
-                    <p className="text-sm text-secondary">{errors.email}</p>
+                    <p id="email-error" className="text-sm text-destructive">{errors.email}</p>
                   ) : null}
                 </div>
 
@@ -147,15 +149,16 @@ export function ContactSection() {
                       updateField("message", event.target.value)
                     }
                     aria-invalid={Boolean(errors.message)}
+                    aria-describedby={errors.message ? "message-error" : undefined}
                   />
                   {errors.message ? (
-                    <p className="text-sm text-secondary">{errors.message}</p>
+                    <p id="message-error" className="text-sm text-destructive">{errors.message}</p>
                   ) : null}
                 </div>
 
                 <Button type="submit" size="lg" className="w-full">
                   <Send className="h-5 w-5" />
-                  Submit Message
+                  Open email draft
                 </Button>
 
                 <p className="min-h-6 text-sm font-medium text-primary" aria-live="polite">

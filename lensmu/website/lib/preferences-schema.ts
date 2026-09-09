@@ -4,40 +4,20 @@ import {
   DEFAULT_SYNCED_PREFERENCES,
   LOCAL_ONLY_SETTING_KEYS,
   PREFERENCE_SCHEMA_VERSION,
+  validateSyncedPreferences,
+  type SyncedPreferences as CanonicalSyncedPreferences,
 } from "../../extension/shared/preferences.js";
 
-const boundedString = (max: number) => z.string().trim().max(max);
-
-export const syncedPreferencesSchema = z
-  .object({
-    sourceLanguage: boundedString(32),
-    targetLanguage: boundedString(32),
-    translationProvider: boundedString(32),
-    allowThirdPartyFallback: z.boolean(),
-    llmModel: boundedString(128),
-    minImageWidth: z.number().int().min(32).max(4096),
-    minImageHeight: z.number().int().min(32).max(4096),
-    showConfidenceBorders: z.boolean(),
-    autoTranslate: z.boolean(),
-    maxConcurrentImages: z.number().int().min(1).max(12),
-    ocrEngine: boundedString(32),
-    fontOverride: boundedString(120),
-    overlayFontFamily: boundedString(32),
-    overlayMinFontSize: z.number().int().min(6).max(72),
-    overlayTextAlign: boundedString(32),
-    darkMode: z.boolean(),
-    prefetchTranslations: z.boolean(),
-    overlayOpacity: z.number().min(0).max(1),
-    enableReadAloud: z.boolean(),
-    elevenLabsVoiceId: boundedString(128),
-    elevenLabsModelId: boundedString(64),
-    elevenLabsOutputFormat: boundedString(64),
-    elevenLabsStability: z.number().min(0).max(1),
-    elevenLabsSimilarityBoost: z.number().min(0).max(1),
-    elevenLabsStyle: z.number().min(0).max(1),
-    elevenLabsSpeed: z.number().min(0.7).max(1.2),
-  })
-  .strict();
+// Validation is owned by the same pure contract as extension storage. Zod
+// adapts its issues to the HTTP route; it does not restate the preference keys.
+export const syncedPreferencesSchema = z.unknown().transform((value, context): CanonicalSyncedPreferences => {
+  const result = validateSyncedPreferences(value);
+  if (!result.success) {
+    for (const issue of result.issues) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+    return z.NEVER;
+  }
+  return result.data as CanonicalSyncedPreferences;
+});
 
 export const preferenceEnvelopeSchema = z
   .object({

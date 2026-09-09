@@ -1,129 +1,82 @@
-// Settings persistence for the popup.
-//
-// Two rules, both learned the hard way:
-//
-//   1. A resolved SAVE_SETTINGS message is not a saved setting. The
-//      background answers { success: false, error } when storage refuses
-//      the write, and a transport failure resolves to undefined in some
-//      paths. Only { success: true } counts; anything else is an error the
-//      caller must show and must not build on (no translating with settings
-//      that were never stored, no closing the popup as if they were).
-//
-//   2. Do not debounce with a timer. The popup is a document Chrome tears
-//      down the instant it loses focus; a pending 180 ms timer simply never
-//      fires, so the last change is lost. Changes are sent as small patches
-//      merged within the current task (a microtask flush), which completes
-//      before the document can unload. The background merges patches into
-//      the stored object and serialises the writes, so rapid changes land in
-//      order and a full snapshot never overwrites a newer patch.
-//
-// Pure module: the message transport is injected so it can be tested.
-
+// The background owns durable write ordering. Transfer edits promptly and retain
+// field revisions until acknowledged; unrelated saves must not hide failures.
 export function assertSaveSettingsResponse(response) {
-  if (response === null || response === undefined) {
-    throw new Error('The extension did not answer the save request.');
-  }
-  if (typeof response !== 'object' || Array.isArray(response)) {
-    throw new Error('The extension answered the save request with an unexpected value.');
-  }
-  if (response.success !== true) {
-    const detail = typeof response.error === 'string' && response.error.trim()
-      ? response.error.trim()
-      : 'Settings could not be saved.';
-    throw new Error(detail);
-  }
+  if (response == null) throw new Error('The extension did not answer the save request.');
+  if (typeof response !== 'object' || Array.isArray(response)) throw new Error('The extension answered the save request with an unexpected value.');
+  if (response.success !== true) throw new Error(typeof response.error === 'string' && response.error.trim() ? response.error.trim() : 'Settings could not be saved.');
   return response;
 }
 
 export function createSettingsPersister({ sendMessage, onError = () => {}, onSaved = () => {} }) {
-  if (typeof sendMessage !== 'function') {
-    throw new TypeError('createSettingsPersister needs a sendMessage function.');
-  }
-
-  let pendingPatch = null;
-  let flushScheduled = false;
-  let chain = Promise.resolve();
-  let lastError = null;
+  if (typeof sendMessage !== 'function') throw new TypeError('A message transport is required.');
+  const dirty = new Map();
+  const inFlight = new Set();
+  const listeners = new Set();
+  let scheduled = false;
+  let revision = 0;
   let saveCount = 0;
+  const currentError = () => [...dirty.values()].find((entry) => entry.error)?.error ?? null;
+  const state = () => ({ revision, status: currentError() ? 'error' : dirty.size ? 'saving' : 'saved', error: currentError(), pendingKeys: [...dirty.keys()] });
+  const notify = () => { for (const listener of listeners) listener(state()); };
 
-  function send(patch) {
-    const run = chain
-      .then(() => sendMessage({ action: 'SAVE_SETTINGS', payload: { settings: patch } }))
-      .then(assertSaveSettingsResponse)
-      .then((response) => {
-        lastError = null;
-        saveCount += 1;
-        onSaved(response, patch);
-        return response;
-      });
-    chain = run.catch((error) => {
-      lastError = error;
+  function dispatch(entries) {
+    if (!entries.length) return;
+    const patch = Object.fromEntries(entries.map(([key, entry]) => [key, entry.value]));
+    for (const [, entry] of entries) entry.error = null;
+    // Invoke now: a response from another save must never delay transfer to the
+    // background, because this document can disappear at the end of any task.
+    let response;
+    try { response = sendMessage({ action: 'SAVE_SETTINGS', payload: { settings: patch } }); }
+    catch (error) { response = Promise.reject(error); }
+    const request = Promise.resolve(response).then(assertSaveSettingsResponse).then((answer) => {
+      for (const [key, entry] of entries) if (dirty.get(key) === entry) dirty.delete(key);
+      saveCount += 1;
+      onSaved(answer, patch);
+      return answer;
+    }).catch((error) => {
+      for (const [key, entry] of entries) if (dirty.get(key) === entry) entry.error = error;
       onError(error, patch);
+      throw error;
+    }).finally(() => {
+      inFlight.delete(request);
+      for (const [, entry] of entries) if (entry.request === request) entry.request = null;
+      notify();
     });
-    return run;
+    for (const [, entry] of entries) entry.request = request;
+    inFlight.add(request);
+    request.catch(() => undefined);
+    notify();
   }
-
   function flush() {
-    flushScheduled = false;
-    const patch = pendingPatch;
-    pendingPatch = null;
-    if (!patch) {
-      return chain;
-    }
-    return send(patch);
+    scheduled = false;
+    dispatch([...dirty].filter(([, entry]) => !entry.request && !entry.error));
   }
-
+  function queuePatch(patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length) return revision;
+    revision += 1;
+    for (const [key, value] of Object.entries(patch)) dirty.set(key, { value, revision, request: null, error: null });
+    if (!scheduled) { scheduled = true; queueMicrotask(flush); }
+    notify();
+    return revision;
+  }
   return {
-    /*
-     * Records a change; every patch queued in the same task is merged and
-     * sent as one message at the end of that task.
-     */
-    queuePatch(patch) {
-      if (!patch || typeof patch !== 'object') {
-        return;
-      }
-      pendingPatch = { ...(pendingPatch || {}), ...patch };
-      if (!flushScheduled) {
-        flushScheduled = true;
-        queueMicrotask(() => {
-          flush().catch(() => undefined);
-        });
-      }
+    queuePatch,
+    async saveNow(patch) {
+      queuePatch(patch);
+      // Explicitly retry already failed fields. New failures reject the action.
+      for (const entry of dirty.values()) if (!entry.request) entry.error = null;
+      flush();
+      const required = [...dirty.values()];
+      const answers = await Promise.all([...new Set(required.map((entry) => entry.request).filter(Boolean))]);
+      const error = required.find((entry) => entry.error)?.error;
+      if (error) throw error;
+      return answers.at(-1) ?? { success: true };
     },
-
-    /*
-     * Sends everything pending plus `settings` now and resolves only when
-     * the background confirmed the write. Rejects otherwise.
-     */
-    saveNow(settings = {}) {
-      pendingPatch = { ...(pendingPatch || {}), ...settings };
-      flushScheduled = false;
-      return flush();
-    },
-
-    /*
-     * Resolves once every queued save has been answered (success or not).
-     * A patch queued in this same task has not been flushed yet, so flush
-     * it first; otherwise the caller would observe the state before the
-     * latest change was even sent.
-     */
-    async whenIdle() {
-      if (pendingPatch) {
-        await flush().catch(() => undefined);
-      }
-      await chain;
-    },
-
-    get lastError() {
-      return lastError;
-    },
-
-    get saveCount() {
-      return saveCount;
-    },
-
-    get hasPending() {
-      return pendingPatch !== null;
-    }
+    async whenIdle() { if (scheduled) flush(); while (inFlight.size) await Promise.allSettled([...inFlight]); },
+    subscribe(listener) { listeners.add(listener); listener(state()); return () => listeners.delete(listener); },
+    get state() { return state(); },
+    get lastError() { return currentError(); },
+    get hasPending() { return dirty.size > 0 || inFlight.size > 0; },
+    get saveCount() { return saveCount; },
   };
 }

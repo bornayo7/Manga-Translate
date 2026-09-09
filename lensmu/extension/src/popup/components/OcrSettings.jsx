@@ -105,19 +105,6 @@ export default function OcrSettings({
             OCR requests here.
           </p>
 
-          <div className="card-divider" />
-
-          <ApiKeyInput
-            label="Custom OCR API key"
-            placeholder="Optional override"
-            storageKey="customOcrApiKey"
-            value={customOcrApiKey}
-            onChange={onCustomOcrApiKeyChange}
-          />
-          <p className="form-hint">
-            Optional override for OCR-only setups. If this is filled in, the
-            OCR engine will use it before the standard Google Vision key.
-          </p>
         </div>
       )}
 

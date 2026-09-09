@@ -23,14 +23,14 @@ export default function LanguageSelector({
   onSourceChange,
   targetLanguage,
   onTargetChange,
+  onSwap,
 }) {
   function handleSwap() {
     if (sourceLanguage === "auto") {
       return;
     }
 
-    onSourceChange(targetLanguage);
-    onTargetChange(sourceLanguage);
+    onSwap();
   }
 
   return (
@@ -91,8 +91,8 @@ export default function LanguageSelector({
       </div>
 
       <p className="form-hint">
-        Auto-detect works well for most pages. Set the source manually if OCR
-        or translation keeps guessing wrong.
+        Choose the source language for the best OCR result. Automatic language
+        coverage depends on the selected engine.
       </p>
     </div>
   );

@@ -3,13 +3,15 @@ import type { Metadata } from "next";
 import { AppAuthProvider } from "@/components/auth/AppAuthProvider";
 import { auth0, isAuth0Enabled } from "@/lib/auth0";
 import "./globals.css";
+import { Navbar } from "@/components/layout/Navbar";
+import { Footer } from "@/components/layout/Footer";
 
 export const metadata: Metadata = {
-  title: "VisionTranslate | Translate text inside images across the web",
+  title: "lensmu | Translate text inside images across the web",
   description:
-    "VisionTranslate is a browser extension that detects text inside webpage images and overlays translated text directly on the page.",
+    "lensmu is a browser extension that detects text inside webpage images and overlays translated text directly on the page.",
   keywords: [
-    "VisionTranslate",
+    "lensmu",
     "browser extension",
     "OCR",
     "image translation",
@@ -17,7 +19,7 @@ export const metadata: Metadata = {
     "AI translation"
   ],
   openGraph: {
-    title: "VisionTranslate",
+    title: "lensmu",
     description:
       "Translate foreign-language text embedded in images, manga panels, screenshots, signs, menus, and scanned pages.",
     type: "website"
@@ -35,7 +37,9 @@ export default async function RootLayout({
     <html lang="en">
       <body>
         <AppAuthProvider authEnabled={isAuth0Enabled} user={session?.user}>
+          <Navbar />
           {children}
+          <Footer />
         </AppAuthProvider>
       </body>
     </html>

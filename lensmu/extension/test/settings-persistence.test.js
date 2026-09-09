@@ -110,3 +110,62 @@ test('saveNow flushes pending patches first and confirms the combined write', as
   assert.equal(background.messages.length, 1);
   assert.deepEqual(background.messages[0].payload.settings, { targetLanguage: 'es', overlayOpacity: 0.5 });
 });
+
+test('a second edit transfers while the first acknowledgment is pending', async () => {
+  const pending = [];
+  const persister = createSettingsPersister({ sendMessage: (message) => new Promise((resolve) => pending.push({ message, resolve })) });
+  persister.queuePatch({ targetLanguage: 'fr' });
+  await Promise.resolve();
+  persister.queuePatch({ overlayOpacity: 0.5 });
+  await Promise.resolve();
+  assert.equal(pending.length, 2, 'both edits are background-owned before popup closure');
+  assert.equal(persister.hasPending, true);
+  for (const request of pending) request.resolve({ success: true });
+  await persister.whenIdle();
+  assert.equal(persister.hasPending, false);
+});
+
+test('failed edits survive unrelated writes; ensureSaved retries the actual values', async () => {
+  const patches = [];
+  let rejectFrench = true;
+  const persister = createSettingsPersister({ sendMessage: async ({ payload }) => {
+    patches.push(payload.settings);
+    return rejectFrench && payload.settings.targetLanguage === 'fr' ? { success: false, error: 'disk unavailable' } : { success: true };
+  } });
+  persister.queuePatch({ targetLanguage: 'fr' });
+  await persister.whenIdle();
+  persister.queuePatch({ darkMode: true });
+  await persister.whenIdle();
+  assert.match(persister.lastError.message, /disk unavailable/);
+  await assert.rejects(() => persister.saveNow(), /disk unavailable/);
+  rejectFrench = false;
+  await persister.saveNow();
+  assert.deepEqual(patches.at(-1), { targetLanguage: 'fr' });
+  assert.equal(persister.lastError, null);
+  assert.equal(persister.hasPending, false);
+});
+
+test('older acknowledgments cannot clear newer failed values or resurrect edits', async () => {
+  const pending = [];
+  const persister = createSettingsPersister({ sendMessage: ({ payload }) => new Promise((resolve) => pending.push({ patch: payload.settings, resolve })) });
+  persister.queuePatch({ targetLanguage: 'fr' });
+  await Promise.resolve();
+  persister.queuePatch({ targetLanguage: 'de' });
+  await Promise.resolve();
+  pending[1].resolve({ success: false, error: 'new value failed' });
+  pending[0].resolve({ success: true });
+  await persister.whenIdle();
+  assert.match(persister.lastError.message, /new value failed/);
+  const retry = persister.saveNow();
+  assert.deepEqual(pending[2].patch, { targetLanguage: 'de' });
+  pending[2].resolve({ success: true });
+  await retry;
+  assert.equal(persister.state.status, 'saved');
+});
+
+test('ensureSaved without edits does not send an empty save', async () => {
+  const background = backgroundDouble();
+  const persister = createSettingsPersister({ sendMessage: background.sendMessage });
+  await persister.saveNow();
+  assert.equal(background.messages.length, 0);
+});

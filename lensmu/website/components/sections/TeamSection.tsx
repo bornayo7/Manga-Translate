@@ -17,9 +17,9 @@ export function TeamSection() {
       <div className="section-shell">
         <div className="mx-auto max-w-3xl text-center">
           <p className="eyebrow">About Us</p>
-          <h2 className="mt-3 text-3xl font-bold leading-tight sm:text-4xl">
-            Built by a product-minded engineering team.
-          </h2>
+          <h1 className="mt-3 text-3xl font-bold leading-tight sm:text-4xl">
+            The people behind lensmu.
+          </h1>
           <p className="mt-5 text-base leading-8 text-muted-foreground">
             A cross-functional group bringing together extension engineering,
             OCR, backend systems, and product design.
