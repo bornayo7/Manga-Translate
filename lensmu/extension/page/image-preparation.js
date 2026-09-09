@@ -4,6 +4,16 @@ import { preparationSettingsKey } from './image-session.js';
 
 const abortError = () => new DOMException('Image work cancelled.', 'AbortError');
 const assertLive = (signal) => { if (signal?.aborted) throw abortError(); };
+class ImageAdmissionError extends Error {}
+
+function validateDimensions(element) {
+  const width = element.naturalWidth ?? element.width;
+  const height = element.naturalHeight ?? element.height;
+  if (![width, height].every((value) => Number.isInteger(value) && value > 0 && value <= 16384) || width * height > 16_000_000) {
+    throw new ImageAdmissionError('Image exceeds the 16 megapixel or 16,384 pixel side limit, or its dimensions are unavailable.');
+  }
+  return { width, height };
+}
 
 export function createPageTransport(chrome) {
   let serial = 0;
@@ -43,7 +53,10 @@ export function createImageReader({ document, window, Image, send, timers = glob
       const cancel = () => finish(abortError());
       const timer = timers.setTimeout(() => finish(new Error('Image loading timed out.')), 15000);
       img.crossOrigin = 'anonymous';
-      img.onload = () => finish();
+      img.onload = () => {
+        try { validateDimensions(img); finish(); }
+        catch (error) { finish(error); }
+      };
       img.onerror = () => finish(new Error('The image could not be loaded.'));
       signal?.addEventListener('abort', cancel, { once: true });
       img.src = url;
@@ -51,11 +64,7 @@ export function createImageReader({ document, window, Image, send, timers = glob
   }
 
   function capture(element) {
-    const width = element.naturalWidth || element.width;
-    const height = element.naturalHeight || element.height;
-    if (!(width > 0 && height > 0) || width * height > 32_000_000) {
-      throw new Error('Image dimensions are unavailable or exceed the 32 megapixel capture limit.');
-    }
+    const { width, height } = validateDimensions(element);
     if (element.tagName === 'CANVAS') return element.toDataURL('image/png');
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -70,6 +79,9 @@ export function createImageReader({ document, window, Image, send, timers = glob
   async function fetchImage(url, signal) {
     const response = await send('FETCH_IMAGE', { url }, signal);
     if (!response?.ok || !response.dataUrl) throw new Error(response?.error || 'Image pixels could not be read.');
+    // Admission precedes capture-canvas allocation and any OCR/provider call.
+    // The proxy's compressed-byte bound does not bound decoded pixel count.
+    await decode(response.dataUrl, signal);
     return response.dataUrl;
   }
 
@@ -77,6 +89,7 @@ export function createImageReader({ document, window, Image, send, timers = glob
     decode,
     async read(source, signal) {
       assertLive(signal);
+      if (source.type === 'img' || source.type === 'canvas') validateDimensions(source.element);
       if (source.type === 'canvas') return capture(source.element);
       const url = new URL(source.url, window.location.href);
       const crossOrigin = ['http:', 'https:'].includes(url.protocol) && url.origin !== window.location.origin;
@@ -84,6 +97,7 @@ export function createImageReader({ document, window, Image, send, timers = glob
         try { return await fetchImage(url.href, signal); }
         catch (error) {
           assertLive(signal);
+          if (error instanceof ImageAdmissionError) throw error;
           if (source.type === 'img' && source.element.crossOrigin) return capture(source.element);
           throw error;
         }
@@ -93,6 +107,7 @@ export function createImageReader({ document, window, Image, send, timers = glob
         return capture(element);
       } catch (error) {
         assertLive(signal);
+        if (error instanceof ImageAdmissionError) throw error;
         if (!['http:', 'https:'].includes(url.protocol)) throw error;
         return fetchImage(url.href, signal);
       }

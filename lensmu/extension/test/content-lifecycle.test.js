@@ -176,3 +176,26 @@ test('partial failures and warnings remain visible while echoed source is neithe
   assert.equal(h.sent.find((m) => m.action === 'GENERATE_READ_ALOUD_AUDIO').payload.text, 'Hello');
   await h.deactivate();
 });
+
+test('known oversized images fail admission without capture, proxy fallback or provider work', async () => {
+  for (const dimensions of [{ naturalWidth: 4001, naturalHeight: 4000 }, { naturalWidth: 16385, naturalHeight: 100 }]) {
+    const h = await loadContentScript(); const img = h.addImage(dimensions);
+    await h.activate(); await click(h, img);
+    assert.equal(preparations(h).length, 0);
+    assert.equal(h.sent.filter((message) => message.action === 'FETCH_IMAGE').length, 0);
+    assert.match(h.controlFor(img).failureNotice.textContent, /16 megapixel/);
+    assert.equal(overlays(h).length, 0); await h.deactivate();
+  }
+});
+
+test('fetched and background image dimensions are admitted before capture or OCR', async () => {
+  for (const url of ['http://page.test/huge.png', 'http://cdn.test/huge.png']) {
+    const h = await loadContentScript({ imageLoads: (_url, image) => { image.naturalWidth = 4001; image.naturalHeight = 4000; } });
+    const background = h.document.createElement('div'); background.style.backgroundImage = `url("${url}")`;
+    h.document.body.appendChild(background); await h.activate(); await click(h, background);
+    assert.equal(preparations(h).length, 0);
+    assert.equal(h.sent.filter((message) => message.action === 'FETCH_IMAGE').length, url.includes('cdn.test') ? 1 : 0);
+    assert.match(h.controlFor(background).failureNotice.textContent, /16 megapixel/);
+    assert.equal(overlays(h).length, 0); await h.deactivate();
+  }
+});

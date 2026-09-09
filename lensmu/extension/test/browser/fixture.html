@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>lensmu extension acceptance fixture</title>
+<style>
+  body { margin: 20px; font: 16px system-ui; background: #eceff2; }
+  img { vertical-align: top; }
+  .row { display: flex; gap: 30px; align-items: start; margin-bottom: 40px; }
+  .frame { position: relative; border: 3px solid #40505f; padding: 12px; }
+  #fit { width: 300px; height: 300px; object-fit: contain; }
+  #background { width: 300px; height: 200px; background: url('/image.svg') center / cover no-repeat; }
+</style>
+<h1>Extension acceptance fixture</h1>
+<div class="row"><img id="first" src="/image.svg" width="300" height="200"><img id="duplicate" src="/image.svg" width="300" height="200"></div>
+<div class="row"><div class="frame"><img id="fit" src="/image.svg"></div><div id="background"></div></div>
+<div id="destination"></div>

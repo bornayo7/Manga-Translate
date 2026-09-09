@@ -43,6 +43,34 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: lensmu/extension
+    env:
+      PLAYWRIGHT_PACKAGE: ${{ runner.temp }}/lensmu-browser-tools/node_modules/playwright/index.mjs
+      BROWSER_ARTIFACTS: ${{ runner.temp }}/lensmu-browser-artifacts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: npm
+          cache-dependency-path: lensmu/extension/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm install --prefix "$RUNNER_TEMP/lensmu-browser-tools" --no-save --package-lock=false playwright@1.62.1
+      - run: node "$RUNNER_TEMP/lensmu-browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
+      - run: node test/browser/acceptance.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extension-browser-acceptance
+          path: ${{ runner.temp }}/lensmu-browser-artifacts
+          if-no-files-found: ignore
+
   backend:
     runs-on: ubuntu-latest
     defaults:

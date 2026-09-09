@@ -51,15 +51,9 @@
  *     Tesseract is best as a fallback or for quick previews.
  *
  * BROWSER EXTENSION CONTEXT:
- * --------------------------
- * In a Chrome extension, Tesseract.js can run in either:
- *   - The background service worker (recommended: doesn't block page rendering)
- *   - A content script (not recommended: might conflict with the page's own scripts)
- *
- * In this MV3 extension, the background service worker is an ES module.
- * ServiceWorkerGlobalScope does NOT allow runtime import(), so we import the
- * bundled Tesseract API statically and still lazily create the OCR worker the
- * first time recognize() is called.
+ * The MV3 worker delegates recognition to offscreen/ocr.html. That document
+ * imports this bundled API and owns worker cleanup through its recognition
+ * session. OCR never depends on host-page CSP or a worker-global idle timer.
  *
  * =============================================================================
  */

@@ -1,10 +1,8 @@
 // Small text/error helpers shared by the extension's ES-module contexts
 // (service worker, offscreen document, provider clients).
 //
-// content.js deliberately keeps its own copies: it is registered as a classic
-// content script, so it cannot use static imports, and pulling these in over
-// dynamic import() would mean widening web_accessible_resources for a handful
-// of one-liners.
+// The classic content entry loads page modules dynamically; those modules
+// import these same helpers through the declared shared resource boundary.
 
 // Collapses whitespace and case so two renderings of the same sentence compare
 // equal. NFKC folds full-width CJK punctuation onto its ASCII equivalent, which
